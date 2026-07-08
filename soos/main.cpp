@@ -2,7 +2,7 @@
 #include <3ds/gpu/gx.h>
 
 /*
-    ChirunoMod - A utility background process for the Nintendo 3DS,
+    Flurry (based on ChirunoMod) - A utility background process for the Nintendo 3DS,
     purpose-built for screen-streaming over WiFi.
 
     Original HorizonM (HzMod) code is Copyright (C) 2017 Sono
@@ -542,7 +542,7 @@ void sendDebugFrametimeStats(double ms_compress, double ms_writesocbuf, double* 
     {
         double ms_dma_localtemp = *ms_dma;
         *ms_dma = 0;
-        sprintf(str3,"DMA copy from framebuffer to ChirunoMod WRAM took %g ms (measurement is %i frames behind)\n",ms_dma_localtemp,dmafallbehind);
+        sprintf(str3,"DMA copy from framebuffer to Flurry WRAM took %g ms (measurement is %i frames behind)\n",ms_dma_localtemp,dmafallbehind);
         dmafallbehind = 0;
     }
 
@@ -813,7 +813,7 @@ void makeTargaImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u3
     init_tga_image(&img, (u8*)screenbuf, *scrw, stride[scr], newbits);
     img.image_type = TGA_IMAGE_TYPE_BGR_RLE;
 
-    // horizontal offset. redundant in chirunomod.
+    // horizontal offset. redundant in chirunomod/flurry.
     img.origin_y = (scr * 400) + (stride[scr] * offs[scr]);
 
     tga_write_to_FILE((soc->bufferptr+bufsoc_pak_data_offset), &img, imgsize);
@@ -1356,7 +1356,7 @@ int main()
     cfgblk[3] = 1;
 
 #if DEBUG_BASIC==1
-    f = fopen("HzLog.log", "a");
+    f = fopen("Flurry.log", "a");
     if((int)f <= 0) f = nullptr;
     else
     {
@@ -1366,7 +1366,7 @@ int main()
         setvbuf(stdout, nullptr, _IONBF, 0);
         setvbuf(stderr, nullptr, _IONBF, 0);
     }
-    printf("ChirunoMod is starting...\n");
+    printf("Flurry is starting...\n");
 #endif
 
     memset(&pat, 0, sizeof(pat));

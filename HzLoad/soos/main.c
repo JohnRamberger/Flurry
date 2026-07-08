@@ -37,7 +37,7 @@ int main()
     if(r & KEY_Y)
         titleid = 0x000401300CF00F02ULL; // HzMod
     else
-        titleid = 0x000401300CF00902ULL; // ChirunoMod
+        titleid = 0x000401300CF00A02ULL; // Flurry
     
 #if _HIMEM
     
@@ -53,9 +53,10 @@ int main()
     nsInit();
     
 #ifndef _HIMEM
-    // shutdown HzMod and ChirunoMod if they happen to be running
-    NS_TerminateProcessTID(0x000401300CF00F02ULL);
-    NS_TerminateProcessTID(0x000401300CF00F09ULL);
+    // shutdown HzMod, Flurry, and the old ChirunoMod if they happen to be running
+    NS_TerminateProcessTID(0x000401300CF00F02ULL); // HzMod
+    NS_TerminateProcessTID(0x000401300CF00A02ULL); // Flurry
+    NS_TerminateProcessTID(0x000401300CF00902ULL); // old ChirunoMod (Flurry replaces it)
 #endif
 
 #ifndef _HIMEM

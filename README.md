@@ -14,14 +14,14 @@ Flurry is based on [ChirunoMod](https://github.com/ChainSwordCS/ChirunoMod) by C
 
 Get the latest stable release of [Chokistream](https://github.com/Eiim/Chokistream/releases) to run on PC.
 
-Grab the latest `.cia` builds from this repo's [GitHub Actions](../../actions) — every commit produces a build artifact containing `ChirunoMod.cia`, `ChLoad.cia`, and `ChLoad_HIMEM.cia`.
+Grab the latest `.cia` builds from this repo's [GitHub Actions](../../actions) — every commit produces a build artifact containing `Flurry.cia`, `FlurryLoad.cia`, and `FlurryLoad_HIMEM.cia`.
 
 On 3DS, use FBI to install the `.cia` files...
 
-Install `ChLoad.cia`, which is the loader.
+Install `FlurryLoad.cia`, which is the loader.
 
 If you are using an original 3DS, 3DS XL, or 2DS, which are otherwise referred to as "Old 3DS" systems,
-if you're going to use the streamer while playing games which use the High/Extended Memory Mode (such as Super Smash Bros. or Pokemon Sun/Moon,) then also install `ChLoad_HIMEM.cia`.
+if you're going to use the streamer while playing games which use the High/Extended Memory Mode (such as Super Smash Bros. or Pokemon Sun/Moon,) then also install `FlurryLoad_HIMEM.cia`.
 
 ## RGB LED color codes
 
@@ -34,11 +34,11 @@ if you're going to use the streamer while playing games which use the High/Exten
 
 ### Error Codes
 - flashing yellow + black = fatal error. if possible, hold Start and Select to shutdown the streamer.
-    - dev: main() function encountered an issue and panicked (hangmacro). check HzLog.log for details.
+    - dev: main() function encountered an issue and panicked (hangmacro). check Flurry.log for details.
 - flashing red + green = stuck (or crashed) in netfuncTestFramebuffer() function.
     - dev: encountered an issue trying to obtain process ID of foreground process (?)
 - flashing red + white = misc. error
-    - dev: possibly C++ exception; CPPCrashHandler(). check HzLog.log for details.
+    - dev: possibly C++ exception; CPPCrashHandler(). check Flurry.log for details.
 - flashing red + other color = failed to start secondary thread (out of resources)
 - red = encountered an error near the start of the main() function
 - dark blue = trying to shut down (perhaps softlocked?)
@@ -81,11 +81,11 @@ The streamer module
 1. Clone the repository.
 2. If desired, change `#define` build flags at the top of `/soos/main.cpp` to enable verbose debug logging or disable debug logging altogether.
 3. Run `make`.
-4. The compiled file is `ChirunoMod.cia`. Copy that to the 3DS and install it using FBI or another cia installer homebrew.
+4. The compiled file is `Flurry.cia`. Copy that to the 3DS and install it using FBI or another cia installer homebrew.
 
-ChLoad (HzLoad)
+FlurryLoad (HzLoad)
 
-1. Navigate to the `/HzLoad/` directory. Run `make` to compile `ChLoad.cia`, or `make HIMEM=1` to compile `ChLoad_HIMEM.cia`.
+1. Navigate to the `/HzLoad/` directory. Run `make` to compile `FlurryLoad.cia`, or `make HIMEM=1` to compile `FlurryLoad_HIMEM.cia`.
 
 # License
 

@@ -26,25 +26,25 @@ include $(DEVKITARM)/3ds_rules
 #     - icon.png
 #     - <libctru folder>/default_icon.png
 #---------------------------------------------------------------------------------
-TARGET		    :=	ChLoad
+TARGET		    :=	FlurryLoad
 BUILD		    :=	build
 SOURCES		    :=	soos
 DATA		    :=	data
 INCLUDES	    :=	inc
-APP_TITLE       :=  ChLoad
-APP_DESCRIPTION :=  ChirunoMod + HzMod Loader
+APP_TITLE       :=  FlurryLoad
+APP_DESCRIPTION :=  Flurry + HzMod Loader
 APP_AUTHOR      :=  Sono, ChainSwordCS
-APP_PRODUCT_CODE:=  CTR-N-ACLA
-APP_UNIQUE_ID   :=  0xCFA9F
+APP_PRODUCT_CODE:=  CTR-N-FLDR
+APP_UNIQUE_ID   :=  0xCF00B
 ICON            :=  assets/logo.png
 BANNER          :=  assets/banner.png
 
 ifneq ($(strip $(HIMEM)),)
-TARGET		    :=	ChLoad_HIMEM
+TARGET		    :=	FlurryLoad_HIMEM
 BUILD		    :=	build_HIMEM
-APP_TITLE       :=  ChHiLoad
-APP_DESCRIPTION :=  ChirunoMod + HzMod HIMEM Loader
-APP_UNIQUE_ID   :=  0xDFA9F
+APP_TITLE       :=  FlurryLoad_HIMEM
+APP_DESCRIPTION :=  Flurry + HzMod HIMEM Loader
+APP_UNIQUE_ID   :=  0xCF00C
 ICON            :=  assets/logo_HIMEM.png
 BANNER          :=  assets/banner_HIMEM.png
 endif

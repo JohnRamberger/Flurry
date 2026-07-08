@@ -1,7 +1,7 @@
 /*
     setdmacfg.h - Shortcut functions to adjust DMA Config block.
 
-    Part of ChirunoMod - A utility background process for the Nintendo 3DS,
+    Part of Flurry (based on ChirunoMod) - A utility background process for the Nintendo 3DS,
     purpose-built for screen-streaming over WiFi.
 
     This program is free software: you can redistribute it and/or modify

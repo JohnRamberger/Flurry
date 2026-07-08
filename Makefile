@@ -27,16 +27,16 @@ include $(DEVKITARM)/3ds_rules
 #     - <libctru folder>/default_icon.png
 #---------------------------------------------------------------------------------
 
-TARGET=ChirunoMod
-BUILD		    :=	chirunomod-build
+TARGET=Flurry
+BUILD		    :=	flurry-build
 SOURCES		    :=	soos
 DATA		    :=	data
 INCLUDES	    :=	inc
-APP_TITLE       :=  ChirunoMod
-APP_DESCRIPTION :=  Chiruno Sys Module
+APP_TITLE       :=  Flurry
+APP_DESCRIPTION :=  Flurry Sys Module
 APP_AUTHOR      :=  Sono, ChainSwordCS
-APP_PRODUCT_CODE:=  CTR-N-ACHA
-APP_UNIQUE_ID   :=  0xCF009
+APP_PRODUCT_CODE:=  CTR-N-FLRY
+APP_UNIQUE_ID   :=  0xCF00A
 
 APP_TITLE       :=  $(shell echo "$(APP_TITLE)" | cut -c1-128)
 APP_DESCRIPTION :=  $(shell echo "$(APP_DESCRIPTION)" | cut -c1-256)

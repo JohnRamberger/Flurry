@@ -1,3 +1,5 @@
+> Flurry is based on ChirunoMod. These credits are inherited from the ChirunoMod project.
+
 # Credits
 
 - ### ChirunoMod Credits

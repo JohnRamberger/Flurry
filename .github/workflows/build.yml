@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ChirunoMod requires the legacy 2017 toolchain: devkitARM r46 + libctru 1.2.1,
+      # Flurry requires the legacy 2017 toolchain: devkitARM r46 + libctru 1.2.1,
       # plus armv6k builds of libjpeg-turbo/zlib (from the HzMod dependency bundle).
       # See README.md "Build Instructions".
       - name: Cache legacy devkitARM toolchain
@@ -84,23 +84,23 @@ jobs:
           echo "$DEVKITARM/bin" >> "$GITHUB_PATH"
           echo "$DEVKITPRO/tools/bin" >> "$GITHUB_PATH"
 
-      - name: Build ChirunoMod
+      - name: Build Flurry
         run: make
 
-      - name: Build ChLoad
+      - name: Build FlurryLoad
         run: make -C HzLoad
 
-      - name: Build ChLoad_HIMEM
+      - name: Build FlurryLoad_HIMEM
         run: make -C HzLoad HIMEM=1
 
       - name: Upload CIAs
         uses: actions/upload-artifact@v4
         with:
-          name: ChirunoMod-${{ github.sha }}
+          name: Flurry-${{ github.sha }}
           path: |
-            ChirunoMod.cia
-            HzLoad/ChLoad.cia
-            HzLoad/ChLoad_HIMEM.cia
+            Flurry.cia
+            HzLoad/FlurryLoad.cia
+            HzLoad/FlurryLoad_HIMEM.cia
           if-no-files-found: error
 
   # Versioning scheme:
@@ -123,7 +123,7 @@ jobs:
       - name: Download CIAs
         uses: actions/download-artifact@v4
         with:
-          name: ChirunoMod-${{ github.sha }}
+          name: Flurry-${{ github.sha }}
 
       - name: Determine version
         id: ver
@@ -163,6 +163,6 @@ jobs:
             --title "${tag#v}" \
             --generate-notes \
             "${flags[@]}" \
-            ChirunoMod.cia \
-            HzLoad/ChLoad.cia \
-            HzLoad/ChLoad_HIMEM.cia
+            Flurry.cia \
+            HzLoad/FlurryLoad.cia \
+            HzLoad/FlurryLoad_HIMEM.cia
