@@ -1,0 +1,12 @@
+/*.elf
+/.settings/
+/.cproject
+/.project
+/build/
+/sockme.cpp
+/ex/
+/Hz.tar.lzma
+/misclib/
+makerom.exe
+/chmod-build/
+/chirunomod-build/
