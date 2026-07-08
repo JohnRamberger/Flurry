@@ -5,7 +5,7 @@
     "description": "3DS screen streaming over WiFi, built for Chokistream.",
     "url": "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/flurry.unistore",
     "file": "flurry.unistore",
-    "revision": 1,
+    "revision": 2,
     "version": 3
   },
   "storeContent": [
@@ -13,11 +13,88 @@
       "info": {
         "title": "Flurry",
         "author": "JohnRamberger",
-        "description": "The Flurry streaming system module plus its loader. Install both, then launch Flurry Loader from the Home Menu.",
-        "category": ["utility"],
-        "console": ["3DS"],
+        "description": "The Flurry streaming system module plus its loader (stable release). Install both, then launch Flurry Loader from the Home Menu.",
+        "category": [
+          "utility"
+        ],
+        "console": [
+          "3DS"
+        ],
         "icon_index": 0,
-        "version": "prerelease"
+        "version": "unreleased"
+      },
+      "Install Flurry + Loader": [
+        {
+          "type": "downloadRelease",
+          "repo": "JohnRamberger/Flurry",
+          "file": "Flurry.cia",
+          "output": "sdmc:/Flurry.cia",
+          "includePrereleases": false,
+          "message": "Downloading Flurry..."
+        },
+        {
+          "type": "installCia",
+          "file": "sdmc:/Flurry.cia",
+          "message": "Installing Flurry..."
+        },
+        {
+          "type": "deleteFile",
+          "file": "sdmc:/Flurry.cia",
+          "message": "Cleaning up..."
+        },
+        {
+          "type": "downloadRelease",
+          "repo": "JohnRamberger/Flurry",
+          "file": "FlurryLoad.cia",
+          "output": "sdmc:/FlurryLoad.cia",
+          "includePrereleases": false,
+          "message": "Downloading Flurry Loader..."
+        },
+        {
+          "type": "installCia",
+          "file": "sdmc:/FlurryLoad.cia",
+          "message": "Installing Flurry Loader..."
+        },
+        {
+          "type": "deleteFile",
+          "file": "sdmc:/FlurryLoad.cia",
+          "message": "Cleaning up..."
+        }
+      ],
+      "Install HIMEM Loader (Old 3DS only)": [
+        {
+          "type": "downloadRelease",
+          "repo": "JohnRamberger/Flurry",
+          "file": "FlurryLoad_HIMEM.cia",
+          "output": "sdmc:/FlurryLoad_HIMEM.cia",
+          "includePrereleases": false,
+          "message": "Downloading Flurry HIMEM Loader..."
+        },
+        {
+          "type": "installCia",
+          "file": "sdmc:/FlurryLoad_HIMEM.cia",
+          "message": "Installing Flurry HIMEM Loader..."
+        },
+        {
+          "type": "deleteFile",
+          "file": "sdmc:/FlurryLoad_HIMEM.cia",
+          "message": "Cleaning up..."
+        }
+      ]
+    },
+    {
+      "info": {
+        "title": "Flurry (Nightly)",
+        "author": "JohnRamberger",
+        "description": "Bleeding-edge prerelease builds from the latest commit on main, for testers. Install both, then launch Flurry Loader from the Home Menu.",
+        "category": [
+          "utility"
+        ],
+        "console": [
+          "3DS"
+        ],
+        "icon_index": 0,
+        "version": "v0.0.0.2"
       },
       "Install Flurry + Loader": [
         {

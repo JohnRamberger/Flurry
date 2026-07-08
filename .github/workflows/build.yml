@@ -120,6 +120,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
       - name: Download CIAs
         uses: actions/download-artifact@v4
         with:
@@ -166,3 +171,28 @@ jobs:
             Flurry.cia \
             HzLoad/FlurryLoad.cia \
             HzLoad/FlurryLoad_HIMEM.cia
+
+      # Re-stamp the UniStore with the current release tags so Universal-Updater
+      # can display versions and detect updates. Pushed back to main with
+      # [skip ci] so it does not trigger another build/release cycle.
+      - name: Stamp UniStore versions
+        run: |
+          set -euo pipefail
+          stable=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 \
+            --json tagName --jq '.[0].tagName // "unreleased"')
+          nightly=$(gh release list --exclude-drafts --limit 1 \
+            --json tagName --jq '.[0].tagName // "unreleased"')
+          revision=$(gh release list --exclude-drafts --limit 200 --json tagName --jq 'length')
+
+          python3 tools/gen_unistore.py --stable "$stable" --nightly "$nightly" --revision "$revision"
+
+          if git diff --quiet -- flurry.unistore; then
+            echo "UniStore already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flurry.unistore
+          git commit -m "chore: stamp UniStore (stable=$stable, nightly=$nightly) [skip ci]"
+          git push origin HEAD:main

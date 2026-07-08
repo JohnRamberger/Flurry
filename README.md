@@ -25,10 +25,13 @@ The easiest way to install Flurry is with [Universal-Updater](https://github.com
 3. Choose **Add with QR code** and scan the code on the right.
    - No camera handy? Choose **Add with keyboard** instead and enter:
      `https://raw.githubusercontent.com/JohnRamberger/Flurry/main/flurry.unistore`
-4. Open the **Flurry** store, select **Flurry**, and run **Install Flurry + Loader**.
-5. On an original 3DS / 3DS XL / 2DS ("Old 3DS"), also run **Install HIMEM Loader (Old 3DS only)** if you plan to stream games that use High/Extended Memory Mode (such as Super Smash Bros. or Pokémon Sun/Moon).
+4. Open the **Flurry** store. It has two entries:
+   - **Flurry** — the latest stable release (recommended for most users).
+   - **Flurry (Nightly)** — bleeding-edge prerelease builds from the latest commit, for testers.
+5. Select the entry you want and run **Install Flurry + Loader**.
+6. On an original 3DS / 3DS XL / 2DS ("Old 3DS"), also run **Install HIMEM Loader (Old 3DS only)** if you plan to stream games that use High/Extended Memory Mode (such as Super Smash Bros. or Pokémon Sun/Moon).
 
-Flurry updates the same way — re-open the store entry and reinstall to pull the latest release.
+Universal-Updater shows the installed version and flags an entry when a newer release is available — just re-open it and reinstall to update.
 
 ### Install manually (FBI)
 
