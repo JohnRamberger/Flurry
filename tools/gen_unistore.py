@@ -13,9 +13,11 @@ the CIA names must stay stable across releases.
 
 import argparse
 import json
+import time
 
 REPO = "JohnRamberger/Flurry"
 RAW_URL = "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/flurry.unistore"
+SHEET_URL = "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/assets/store/flurry.t3x"
 
 
 def _download(fname, out, msg, prereleases):
@@ -37,7 +39,7 @@ def _delete(path):
     return {"type": "deleteFile", "file": path, "message": "Cleaning up..."}
 
 
-def _entry(title, description, version, prereleases):
+def _entry(title, description, version, prereleases, icon_index=0):
     core = [
         _download("Flurry.cia", "sdmc:/Flurry.cia", "Downloading Flurry...", prereleases),
         _install("sdmc:/Flurry.cia", "Installing Flurry..."),
@@ -58,7 +60,7 @@ def _entry(title, description, version, prereleases):
             "description": description,
             "category": ["utility"],
             "console": ["3DS"],
-            "icon_index": 0,
+            "icon_index": icon_index,
             "version": version,
         },
         "Install Flurry + Loader": core,
@@ -74,6 +76,8 @@ def build(stable, nightly, revision):
             "description": "3DS screen streaming over WiFi, built for Chokistream.",
             "url": RAW_URL,
             "file": "flurry.unistore",
+            "sheet": "flurry.t3x",
+            "sheetURL": SHEET_URL,
             "revision": revision,
             "version": 3,
         },
@@ -84,6 +88,7 @@ def build(stable, nightly, revision):
                 "Install both, then launch Flurry Loader from the Home Menu.",
                 stable,
                 False,
+                icon_index=0,
             ),
             _entry(
                 "Flurry (Nightly)",
@@ -91,6 +96,7 @@ def build(stable, nightly, revision):
                 "Install both, then launch Flurry Loader from the Home Menu.",
                 nightly,
                 True,
+                icon_index=1,
             ),
         ],
     }
@@ -100,12 +106,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stable", required=True, help="latest stable release tag")
     ap.add_argument("--nightly", required=True, help="latest release tag of any kind")
-    ap.add_argument("--revision", type=int, required=True, help="store revision (monotonic)")
+    ap.add_argument("--revision", type=int, default=None,
+                    help="store revision; defaults to the current Unix time so it "
+                         "increases monotonically and UU always re-fetches the store")
     ap.add_argument("--out", default="flurry.unistore")
     a = ap.parse_args()
 
+    revision = a.revision if a.revision is not None else int(time.time())
+
     with open(a.out, "w") as f:
-        json.dump(build(a.stable, a.nightly, a.revision), f, indent=2)
+        json.dump(build(a.stable, a.nightly, revision), f, indent=2)
         f.write("\n")
 
 

@@ -5,7 +5,9 @@
     "description": "3DS screen streaming over WiFi, built for Chokistream.",
     "url": "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/flurry.unistore",
     "file": "flurry.unistore",
-    "revision": 5,
+    "sheet": "flurry.t3x",
+    "sheetURL": "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/assets/store/flurry.t3x",
+    "revision": 1783494011,
     "version": 3
   },
   "storeContent": [
@@ -93,7 +95,7 @@
         "console": [
           "3DS"
         ],
-        "icon_index": 0,
+        "icon_index": 1,
         "version": "v0.1.0"
       },
       "Install Flurry + Loader": [

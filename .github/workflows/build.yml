@@ -182,9 +182,9 @@ jobs:
             --json tagName --jq '.[0].tagName // "unreleased"')
           nightly=$(gh release list --exclude-drafts --limit 1 \
             --json tagName --jq '.[0].tagName // "unreleased"')
-          revision=$(gh release list --exclude-drafts --limit 200 --json tagName --jq 'length')
 
-          python3 tools/gen_unistore.py --stable "$stable" --nightly "$nightly" --revision "$revision"
+          # revision defaults to the current Unix time (monotonic) inside the generator
+          python3 tools/gen_unistore.py --stable "$stable" --nightly "$nightly"
 
           if git diff --quiet -- flurry.unistore; then
             echo "UniStore already up to date."
