@@ -4,6 +4,14 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for a stable release (e.g. 1.0.0). Leave empty for a plain build."
+        required: false
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -94,3 +102,67 @@ jobs:
             HzLoad/ChLoad.cia
             HzLoad/ChLoad_HIMEM.cia
           if-no-files-found: error
+
+  # Versioning scheme:
+  #   - Manual dispatch with a version input (e.g. 1.0.0) publishes stable release v1.0.0.
+  #   - Every push to main publishes prerelease v<latest-stable>.N (v1.0.0.1, v1.0.0.2, ...),
+  #     restarting from .1 after each stable release. Before any stable exists, base is 0.0.0.
+  release:
+    needs: build
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download CIAs
+        uses: actions/download-artifact@v4
+        with:
+          name: ChirunoMod-${{ github.sha }}
+
+      - name: Determine version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+            if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Version must look like 1.0.0 (got: $version)"
+              exit 1
+            fi
+            if gh release view "v$version" >/dev/null 2>&1; then
+              echo "::error::Release v$version already exists"
+              exit 1
+            fi
+            echo "tag=v$version" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            base=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 \
+              --json tagName --jq '.[0].tagName // "v0.0.0"' | sed 's/^v//')
+            n=$(gh api "repos/$GH_REPO/git/matching-refs/tags/v$base." \
+              --jq "[.[].ref | ltrimstr(\"refs/tags/v$base.\") | select(test(\"^[0-9]+$\")) | tonumber] | max // 0")
+            echo "tag=v$base.$((n + 1))" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          flags=()
+          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$tag" \
+            --target "${{ github.sha }}" \
+            --title "${tag#v}" \
+            --generate-notes \
+            "${flags[@]}" \
+            ChirunoMod.cia \
+            HzLoad/ChLoad.cia \
+            HzLoad/ChLoad_HIMEM.cia
