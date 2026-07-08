@@ -14,14 +14,29 @@ Flurry is based on [ChirunoMod](https://github.com/ChainSwordCS/ChirunoMod) by C
 
 Get the latest stable release of [Chokistream](https://github.com/Eiim/Chokistream/releases) to run on PC.
 
-Grab the latest `.cia` builds from this repo's [GitHub Actions](../../actions) — every commit produces a build artifact containing `Flurry.cia`, `FlurryLoad.cia`, and `FlurryLoad_HIMEM.cia`.
+### Install on 3DS (recommended: Universal-Updater)
 
-On 3DS, use FBI to install the `.cia` files...
+The easiest way to install Flurry is with [Universal-Updater](https://github.com/Universal-Team/Universal-Updater) — it downloads and installs the CIAs for you, straight from this repo's releases.
 
-Install `FlurryLoad.cia`, which is the loader.
+<img src="assets/flurry-unistore-qr.png" alt="Flurry UniStore QR code" width="180" align="right" />
 
-If you are using an original 3DS, 3DS XL, or 2DS, which are otherwise referred to as "Old 3DS" systems,
-if you're going to use the streamer while playing games which use the High/Extended Memory Mode (such as Super Smash Bros. or Pokemon Sun/Moon,) then also install `FlurryLoad_HIMEM.cia`.
+1. Install and open **Universal-Updater** on your 3DS.
+2. Go to **Settings → Select UniStore → Add new** (the rightmost icon).
+3. Choose **Add with QR code** and scan the code on the right.
+   - No camera handy? Choose **Add with keyboard** instead and enter:
+     `https://raw.githubusercontent.com/JohnRamberger/Flurry/main/flurry.unistore`
+4. Open the **Flurry** store, select **Flurry**, and run **Install Flurry + Loader**.
+5. On an original 3DS / 3DS XL / 2DS ("Old 3DS"), also run **Install HIMEM Loader (Old 3DS only)** if you plan to stream games that use High/Extended Memory Mode (such as Super Smash Bros. or Pokémon Sun/Moon).
+
+Flurry updates the same way — re-open the store entry and reinstall to pull the latest release.
+
+### Install manually (FBI)
+
+Prefer to do it by hand? Grab the `.cia` builds from the [latest release](../../releases) (or a [GitHub Actions](../../actions) build artifact — every commit produces one), then on 3DS use FBI to install them:
+
+- Install `FlurryLoad.cia`, which is the loader.
+- Install `Flurry.cia`, the streaming system module itself.
+- On an "Old 3DS" system, if you're going to use the streamer while playing games which use the High/Extended Memory Mode (such as Super Smash Bros. or Pokemon Sun/Moon,) then also install `FlurryLoad_HIMEM.cia`.
 
 ## RGB LED color codes
 
