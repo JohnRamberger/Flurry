@@ -1417,6 +1417,10 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // or lie for inter-process handles on Old 3DS.
                 volatile u32* sentinel =
                     (volatile u32*)&capbuf[cap_pending][(cmeta[cap_pending].dlen / 4) - 1];
+                // Invalidate the sentinel's cache line before every read:
+                // the DMA writes RAM, not the CPU cache; a stale cached
+                // sentinel reads as an eternal fake torn.
+                svcFlushProcessDataCache(0xFFFF8001, (u8*)sentinel, 4);
                 bool done = (*sentinel != CAP_SENTINEL);
 
                 // Sleep most of the expected remaining transfer time in one
@@ -1434,6 +1438,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 }
                 for(int i = 0; !done && i < 800; i++)
                 {
+                    svcFlushProcessDataCache(0xFFFF8001, (u8*)sentinel, 4);
                     if(*sentinel != CAP_SENTINEL)
                     {
                         done = true;
@@ -1442,6 +1447,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                     if((i & 7) == 7)
                     {
                         int dmaState = -1;
+                        svcFlushProcessDataCache(0xFFFF8001, (u8*)sentinel, 4);
                         if(svcGetDmaState(&dmaState, dmahand) >= 0 && dmaState == 4
                            && *sentinel != CAP_SENTINEL)
                         {
@@ -1528,6 +1534,15 @@ void newThreadMainFunction(void* __dummy_arg__)
                         if(m->hwil) dl /= 2;
                         m->dlen = dl;
                         capbuf[nxt][(dl / 4) - 1] = CAP_SENTINEL;
+                        // CRITICAL: flush the sentinel to RAM immediately.
+                        // The CPU write above leaves a DIRTY cache line; if
+                        // it wrote back AFTER the DMA it would clobber the
+                        // freshly captured pixels at the strip's end —
+                        // seen as sentinel-colored (yellow) corruption in
+                        // the strip's top-right, phantom crc changes, and
+                        // fake torn drops.
+                        svcFlushProcessDataCache(0xFFFF8001,
+                            (u8*)&capbuf[nxt][(dl / 4) - 1], 4);
                     }
 
                     int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
@@ -1611,9 +1626,14 @@ void newThreadMainFunction(void* __dummy_arg__)
 
             int imgsize = 0;
 
-            if(isold == 0){
-                svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf, capin.screencapture[scr].framebuf_widthbytesize * 400);
-            }
+            // Invalidate the WHOLE buffer before the CPU reads it (crc,
+            // decimation, encode, raw-rect copy): the DMA wrote RAM and any
+            // stale cache lines read back old pixels — on Old 3DS this was
+            // never done at all (legacy only flushed on New 3DS) and caused
+            // phantom cell changes. Flush = clean+invalidate; lines are
+            // clean here so this is effectively an invalidate.
+            svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf,
+                                     stride[scr] * 240 * 3);
 
             bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240; // bytes per pixel (dumb)
             scrw = 240; // sure
