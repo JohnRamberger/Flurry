@@ -1764,7 +1764,12 @@ void newThreadMainFunction(void* __dummy_arg__)
                     u32 w_cols = (u32)(maxr - minr + 1) * cw;
                     u32 h_px = (u32)(maxs - mins + 1) * ch;
                     u32 rawbytes = w_cols * h_px * capbpc;
-                    if(rawbytes <= 12 * 1024 && (int)(rawbytes + 26) < soc->bufsize)
+                    // Raw cap 32 KB: socket sends cost per-PACKET (~3 ms
+                    // IPC, nearly size-independent) and WiFi has headroom,
+                    // so a bigger exact-pixel rect is cheaper than the JPEG
+                    // encode it avoids. Bounded by the o3DS 48 KB socket
+                    // buffer.
+                    if(rawbytes <= 32 * 1024 && (int)(rawbytes + 26) < soc->bufsize)
                     {
                         u8* b = soc->bufferptr;
                         b[0] = 0x90; // SFRAME
