@@ -1282,6 +1282,40 @@ void newThreadMainFunction(void* __dummy_arg__)
     // Index of the capture buffer with a DMA in flight (-1 = none).
     int cap_pending = -1;
 
+    // Multi-rect batching: consecutive same-screen raw dirty rects
+    // accumulate into one SFRAME (region_count>1) in the socket buffer and
+    // send once, instead of one packet per strip — socket sends cost
+    // per-PACKET (~5 ms IPC, the current bottleneck). Payload grows in
+    // soc->bufferptr+8; batch_scr = which screen it belongs to (-1 none).
+    int batch_scr = -1;
+    u32 batch_payload = 4; // pass header (flags,count,00,00) + regions
+    u8  batch_count = 0;
+    auto flush_batch = [&]()
+    {
+        if(batch_count == 0 || batch_scr < 0 || !soc)
+        {
+            batch_scr = -1; batch_payload = 4; batch_count = 0;
+            return;
+        }
+        u8* b = soc->bufferptr;
+        b[0] = 0x90;              // SFRAME
+        b[1] = (u8)batch_scr;
+        b[2] = (u8)(v2_seq & 0xFF);
+        b[3] = (u8)(v2_seq >> 8);
+        v2_seq++;
+        // Sweep marker consumed the same way sframe_wrap does, so batched
+        // and per-strip sends agree on the fps unit (no double count).
+        b[8] = sweep_pending[batch_scr]; sweep_pending[batch_scr] = 0;
+        b[9] = batch_count;       // region_count
+        b[10] = 0; b[11] = 0;
+        soc->setPakSize(batch_payload);
+        u64 t = svcGetSystemTick();
+        soc->wribuf();
+        st_send += svcGetSystemTick() - t;
+        st_sent++;
+        batch_scr = -1; batch_payload = 4; batch_count = 0;
+    };
+
     u32 siz = 0x80;
     u32 bsiz = 1;
     u32 scrw = 2;
@@ -1396,6 +1430,11 @@ void newThreadMainFunction(void* __dummy_arg__)
             }
         }
 
+        // Incoming settings read into soc->bufferptr — flush a pending batch
+        // first so it isn't clobbered. Only when a packet is actually
+        // waiting (rare), so normal batching is untouched.
+        if(housekeep && soc->avail())
+            flush_batch();
         while(housekeep && soc->avail())
         { // ?
 
@@ -1746,6 +1785,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 && (capbpc == 2 || capbpc == 3)
                 && cw > 0 && (stride[scr] % cw == 0) && (stride[scr] / cw) <= 20;
             bool v2raw_built = false;
+            bool raw_batched = false; // raw rect appended to the pending batch
             if(v2cells)
             {
                 u32 cellcols = stride[scr] / cw;
@@ -1833,7 +1873,18 @@ void newThreadMainFunction(void* __dummy_arg__)
                     // buffer.
                     if(rawbytes <= 32 * 1024 && (int)(rawbytes + 26) < soc->bufsize)
                     {
-                        u8* dst = soc->bufferptr + 26;
+                        // Append this raw rect to the pending batch (one
+                        // SFRAME with region_count>1, flushed on sweep wrap
+                        // or screen change). Flush first if the batch is for
+                        // another screen or this rect would overflow.
+                        if(batch_scr >= 0 && (batch_scr != scr ||
+                            (int)(8 + batch_payload + 14 + rawbytes) > soc->bufsize - 16))
+                            flush_batch();
+                        if(batch_scr < 0)
+                        { batch_scr = scr; batch_payload = 4; batch_count = 0; }
+
+                        u8* rgn = soc->bufferptr + 8 + batch_payload;
+                        u8* dst = rgn + 14;
                         for(u32 col = 0; col < w_cols; col++)
                         {
                             const u8* src = (const u8*)screenbuf
@@ -1843,15 +1894,26 @@ void newThreadMainFunction(void* __dummy_arg__)
                         }
                         u16 rx = (u16)(strip_x + (u32)minr * cw);
                         u16 ry = (u16)((cellsegs - 1 - (u32)maxs) * ch);
-                        sframe_wrap(soc, scr, rx, ry, (u16)w_cols, (u16)h_px,
-                                    (capbpc == 2) ? 0 : 3, 0, rawbytes);
+                        rgn[0] = rx & 0xFF;      rgn[1] = rx >> 8;
+                        rgn[2] = ry & 0xFF;      rgn[3] = ry >> 8;
+                        rgn[4] = w_cols & 0xFF;  rgn[5] = (w_cols >> 8) & 0xFF;
+                        rgn[6] = h_px & 0xFF;    rgn[7] = (h_px >> 8) & 0xFF;
+                        rgn[8] = (capbpc == 2) ? 0 : 3; // codec raw565 / BGR8
+                        rgn[9] = 0;
+                        rgn[10] = rawbytes & 0xFF;
+                        rgn[11] = (rawbytes >> 8) & 0xFF;
+                        rgn[12] = (rawbytes >> 16) & 0xFF;
+                        rgn[13] = (rawbytes >> 24) & 0xFF;
+                        batch_payload += 14 + rawbytes;
+                        batch_count++;
                         v2raw_built = true;
+                        raw_batched = true; // deferred — sent by flush_batch
                     }
                     else if(cfgblk[CFG_FORMAT] == 0)
                     {
-                        // Large dirty area: JPEG of the dirty RECT (via
-                        // pitch), not the whole strip — exact update bounds
-                        // and encode cost that scales with the change.
+                        // Large dirty area: JPEG the dirty RECT. Flush any
+                        // pending raw batch first — it shares this buffer.
+                        flush_batch();
                         st_t0 = svcGetSystemTick();
                         u32 ebpc = capbpc;
                         if(ebpc == 2)
@@ -1978,6 +2040,9 @@ void newThreadMainFunction(void* __dummy_arg__)
             }
             else
             {
+            // Full-strip encode writes soc->bufferptr — flush any pending
+            // raw batch first (it shares the buffer).
+            flush_batch();
             st_t0 = svcGetSystemTick();
             switch(cfgblk[CFG_FORMAT])
             {
@@ -2028,8 +2093,10 @@ void newThreadMainFunction(void* __dummy_arg__)
                             1, rflags, dlen);
             }
 
-            // If size is 0, don't send the packet.
-            if(soc->getPakSize())
+            // If size is 0, don't send the packet. Raw-batched strips defer
+            // to flush_batch (their bytes are the pending batch, not a
+            // finished packet).
+            if(!raw_batched && soc->getPakSize())
             {
 #if DEBUG_VERBOSE==1
                 osTickCounterUpdate(&tick_ctr_1);
@@ -2046,6 +2113,12 @@ void newThreadMainFunction(void* __dummy_arg__)
 #endif
             }
 
+            // Sweep complete for this screen → flush its pending batch as
+            // the sweep-marked frame. Single-screen streaming collapses a
+            // whole sweep of raw rects into one send.
+            if(batch_scr == scr && (u32)cap_strip + 1 >= limit[scr])
+                flush_batch();
+
             enc_rows_override = 0;
             } // end of ready-buffer processing
 
@@ -2057,6 +2130,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 u64 st_now = osGetTime();
                 if(cfgblk[CFG_STATS] && st_now - st_epoch_ms >= 1000)
                 {
+                    flush_batch(); // stats sprintf reuses soc->bufferptr
                     // ARM11 system tick frequency (SYSCLOCK_ARM11 in modern
                     // libctru; not defined in the legacy 1.2.1 headers).
                     const double tick2ms = 1000.0 / 268123480.0;
@@ -2099,6 +2173,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             if(chunks_realloc_needed && isold)
             {
                 chunks_realloc_needed = 0;
+                flush_batch(); // geometry changes; send accumulated regions
                 tryStopDma(&dmahand);
                 cap_pending = -1;
                 cmeta[0].valid = 0;
@@ -2160,6 +2235,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             yield();
         }
     }
+    flush_batch(); // send any regions accumulated before the loop exited
     // Notif LED = Flashing yellow and purple
     memset(&pat.r[0], 0xFF, 16);
     memset(&pat.g[0], 0xFF, 16);
