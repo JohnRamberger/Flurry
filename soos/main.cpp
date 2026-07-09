@@ -678,23 +678,11 @@ int netfuncWaitForSettings()
                     return 1;
 
                 case 0x05: // Request to use Interlacing (yes or no)
-                    j = j?1:0;
-
-                    if(isold)
-                    {
-                        /* interlacing is disabled on o3DS
-                        // If o3DS toggles Interlaced, signal to re-allocate framebuffer.
-                        if(j != cfgblk[5])
-                        {
-                            cfgblk[5] = j;
-                            return 9;
-                        }
-                        */
-                    }
-                    else
-                    {
-                        cfgblk[5] = j;
-                    }
+                    // Historically disabled on Old 3DS, but only because it
+                    // was paired with full-frame capture (144 KB buffer).
+                    // Combined with chunked capture the strip buffer already
+                    // fits, so it's allowed everywhere now.
+                    cfgblk[5] = j?1:0;
                     return 1;
 
                 case 0x06: // Flurry extension: skip unchanged strips (crc32)
@@ -1202,8 +1190,8 @@ void newThreadMainFunction(void* __dummy_arg__)
     format[0] = capin.screencapture[0].format & 0b111;
     format[1] = capin.screencapture[1].format & 0b111;
 
-    // interlacing is disabled on o3DS and 24bpp frames
-    if(cfgblk[5] && !isold && (format[scr] != 1))
+    // interlacing is disabled on 24bpp frames
+    if(cfgblk[5] && (format[scr] != 1))
         isDmaSetForInterlaced = true;
     else
         isDmaSetForInterlaced = false;
@@ -1253,8 +1241,8 @@ void newThreadMainFunction(void* __dummy_arg__)
             format[0] = capin.screencapture[0].format & 0b111;
             format[1] = capin.screencapture[1].format & 0b111;
 
-            // interlacing is disabled on o3DS and 24bpp frames
-            if(cfgblk[5] && !isold && (getFormatBpp(format[scr]) != 24))
+            // interlacing is disabled on 24bpp frames
+            if(cfgblk[5] && (getFormatBpp(format[scr]) != 24))
                 isDmaSetForInterlaced = true;
             else
                 isDmaSetForInterlaced = false;
@@ -1854,7 +1842,7 @@ int main()
                     soc->setPakSubtype(0x04);
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
-                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00011011; // strip-skip | fps-cap | chunks | strip-sleep
+                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00011111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep
                     soc->setPakSize(2);
                     soc->wribuf();
 
