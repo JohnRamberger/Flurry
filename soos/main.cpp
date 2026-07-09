@@ -1669,8 +1669,14 @@ void newThreadMainFunction(void* __dummy_arg__)
             if(grows != 1 && grows != 2 && grows != 4 && grows != 8) grows = 1;
             u32 cw = ((scr == 0) ? 400 : 320) / gcols;
             u32 ch = 240 / grows;
+            // Bytes per pixel in the CAPTURED buffer: the DMA squeezes
+            // 32bpp sources to 24, so post-capture it's 2 or 3. Home Menu
+            // runs 24bpp — the previous 16bpp-only guard silently disabled
+            // the whole cell system there (full-column updates only).
+            u32 capbpc = getFormatBpp(format[scr]);
+            capbpc = (capbpc == 32) ? 3 : capbpc / 8;
             bool v2cells = cfgblk[15] && cfgblk[6] && !dma_torn && !hwInterlaced
-                && getFormatBpp(format[scr]) == 16
+                && (capbpc == 2 || capbpc == 3)
                 && cw > 0 && (stride[scr] % cw == 0) && (stride[scr] / cw) <= 20;
             bool v2raw_built = false;
             if(v2cells)
@@ -1687,8 +1693,8 @@ void newThreadMainFunction(void* __dummy_arg__)
                         for(u32 rr = 0; rr < cw; rr++)
                         {
                             const u8* p = (const u8*)screenbuf
-                                + (((cr * cw) + rr) * 240 + cs * ch) * 2;
-                            c = crc32(c, (const Bytef*)p, ch * 2);
+                                + (((cr * cw) + rr) * 240 + cs * ch) * capbpc;
+                            c = crc32(c, (const Bytef*)p, ch * capbpc);
                         }
                         u32* slot = &cell_crc[scr][cap_strip & 7][cr][cs];
                         if(*slot != c)
@@ -1745,13 +1751,14 @@ void newThreadMainFunction(void* __dummy_arg__)
                     *age = 0;
                 }
 
-                // Small dirty rect: ship raw RGB565 (no encode, full res).
+                // Small dirty rect: ship raw pixels (no encode, full res) —
+                // RGB565 (codec 0) or BGR8 (codec 3) to match the capture.
                 // Large: fall through to the normal full-strip JPEG.
                 if(maxr >= 0)
                 {
                     u32 w_cols = (u32)(maxr - minr + 1) * cw;
                     u32 h_px = (u32)(maxs - mins + 1) * ch;
-                    u32 rawbytes = w_cols * h_px * 2;
+                    u32 rawbytes = w_cols * h_px * capbpc;
                     if(rawbytes <= 12 * 1024 && (int)(rawbytes + 26) < soc->bufsize)
                     {
                         u8* b = soc->bufferptr;
@@ -1772,7 +1779,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                         rh[2] = ry & 0xFF; rh[3] = ry >> 8;
                         rh[4] = w_cols & 0xFF; rh[5] = (w_cols >> 8) & 0xFF;
                         rh[6] = h_px & 0xFF; rh[7] = (h_px >> 8) & 0xFF;
-                        rh[8] = 0; // codec: raw RGB565
+                        rh[8] = (capbpc == 2) ? 0 : 3; // codec: raw RGB565 / raw BGR8
                         rh[9] = 0; // progressive, full-res
                         rh[10] = rawbytes & 0xFF;
                         rh[11] = (rawbytes >> 8) & 0xFF;
@@ -1782,9 +1789,9 @@ void newThreadMainFunction(void* __dummy_arg__)
                         for(u32 col = 0; col < w_cols; col++)
                         {
                             const u8* src = (const u8*)screenbuf
-                                + ((((u32)minr * cw) + col) * 240 + (u32)mins * ch) * 2;
-                            memcpy(dst, src, h_px * 2);
-                            dst += h_px * 2;
+                                + ((((u32)minr * cw) + col) * 240 + (u32)mins * ch) * capbpc;
+                            memcpy(dst, src, h_px * capbpc);
+                            dst += h_px * capbpc;
                         }
                         v2raw_built = true;
                     }
