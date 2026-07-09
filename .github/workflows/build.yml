@@ -148,6 +148,18 @@ jobs:
             HzLoad/FlurryLoad_HIMEM.cia
           if-no-files-found: error
 
+      # Unstripped ELFs so Luma crash-dump PCs can be symbolicated
+      # (arm-none-eabi-addr2line -e Flurry.elf <pc>).
+      - name: Upload ELFs (crash symbolication)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flurry-elf-${{ github.sha }}
+          path: |
+            Flurry.elf
+            HzLoad/FlurryLoad.elf
+            HzLoad/FlurryLoad_HIMEM.elf
+          if-no-files-found: warn
+
   # Versioning scheme:
   #   - Manual dispatch with a version input (e.g. 1.0.0) publishes stable release v1.0.0.
   #   - Every push to main publishes prerelease v<latest-stable>.N (v1.0.0.1, v1.0.0.2, ...),
