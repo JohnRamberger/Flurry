@@ -280,6 +280,12 @@ must assume a pre-extension sysmodule and only use subtypes 0x01–0x05.
 | 0x08 | FPS cap | target fps, 0 = uncapped |
 | 0x09 | Chunk count | strips per screen on Old 3DS: 2, 4 or 8 (default 8; TGA forces 8). Clients must reassemble by pasting chunk *i* at offset *i × decoded-image-height* — never assume 8 |
 | 0x0A | Strip sleep | ms pause between strips on Old 3DS, 0–20 (default 5; 0 disables the pacing floor) |
+| 0x0B | Quarter-res | bool — Old 3DS decimates both axes before encode (~4× faster). Frames carry image-subtype **bit 7**; the client scales each decoded pixel to a 2×2 block and doubles the chunk row offset |
+
+Feature bit 5 = quarter-res. Old-3DS interlace (feature bit 2) is implemented
+in software (pixel decimation before encode) because the o3DS kernel data-
+aborts on the gather-stride DMA configuration hardware interlace requires;
+it only applies to 16-bit source formats.
 
 Strip skip requires the client to keep a persistent per-screen buffer (a
 skipped strip simply stays stale until it changes or the refresh interval

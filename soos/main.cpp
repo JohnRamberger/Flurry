@@ -449,6 +449,10 @@ static u64 pace_last = 0;
 // Set when the chunk count (cfgblk[9]) or format changes and screenbuf must
 // be reallocated at the next safe point in the capture loop.
 static vu8 chunks_realloc_needed = 0;
+// Nonzero while encoding a quarter-res (software downscaled) strip: the row
+// count the encoders should use instead of stride[scr]. Also drives wire
+// subtype bit 7 so the client knows to scale 2x.
+static u32 enc_rows_override = 0;
 
 // Based on (and slightly modified from) devkitpro/libctru source
 //
@@ -709,6 +713,10 @@ int netfuncWaitForSettings()
                     cfgblk[10] = (j > 20) ? 20 : j;
                     return 1;
 
+                case 0x0B: // Flurry extension: quarter-res downscale (Old 3DS, bool)
+                    cfgblk[11] = j?1:0;
+                    return 1;
+
                 default:
                     // Invalid subtype for "Settings" packet-type
                     return 1;
@@ -853,7 +861,9 @@ void makeTargaImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u3
         break;
     }
 
-    init_tga_image(&img, (u8*)screenbuf, *scrw, stride[scr], newbits);
+    u32 enc_rows = enc_rows_override ? enc_rows_override : stride[scr];
+
+    init_tga_image(&img, (u8*)screenbuf, *scrw, enc_rows, newbits);
     img.image_type = TGA_IMAGE_TYPE_BGR_RLE;
 
     // horizontal offset. redundant in chirunomod/flurry.
@@ -869,6 +879,8 @@ void makeTargaImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u3
     u8 subtype_aka_flags = 0b00001000 + (scr * 0b00010000) + (format[scr] & 0b111);
     if(isInterlaced)
         subtype_aka_flags += 0b00100000 + (interlacedRowSwitch?0:0b01000000);
+    if(enc_rows_override)
+        subtype_aka_flags |= 0b10000000; // quarter-res: client scales 2x2
 
     soc->setPakType(01);
     soc->setPakSubtype(subtype_aka_flags);
@@ -882,11 +894,14 @@ void makeJpegImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u32
     u8 nativepixelformat = myformat[scr] & 0b111;
     u8 subtype_aka_flags = 0b00000000 + (scr * 0b00010000) + nativepixelformat;
     int tjpixelformat = 0;
+    u32 enc_rows = enc_rows_override ? enc_rows_override : stride[scr];
 
     if(isinterlaced)
     {
         subtype_aka_flags += 0b00100000 + (interlacedRowSwitch?0:0b01000000);
     }
+    if(enc_rows_override)
+        subtype_aka_flags |= 0b10000000; // quarter-res: client scales 2x2
 
 #if DEBUG_VERBOSE==1
     osTickCounterUpdate(&tick_ctr_1);
@@ -906,19 +921,19 @@ void makeJpegImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u32
         break;
 
     case 2: // RGB565
-        convert16to24_rgb565(stride[scr], *scrw, (u8*)screenbuf);
+        convert16to24_rgb565(enc_rows, *scrw, (u8*)screenbuf);
         tjpixelformat = TJPF_RGB;
         *bsiz = 3;
         break;
 
     case 3: // RGB5A1
-        convert16to24_rgb5a1(stride[scr], *scrw, (u8*)screenbuf);
+        convert16to24_rgb5a1(enc_rows, *scrw, (u8*)screenbuf);
         tjpixelformat = TJPF_RGB;
         *bsiz = 3;
         break;
 
     case 4: // RGBA4
-        convert16to24_rgba4(stride[scr], *scrw, (u8*)screenbuf);
+        convert16to24_rgba4(enc_rows, *scrw, (u8*)screenbuf);
         tjpixelformat = TJPF_RGB;
         *bsiz = 3;
         break;
@@ -936,7 +951,7 @@ void makeJpegImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u32
 
     u8* destaddr = soc->bufferptr + bufsoc_pak_data_offset;
 
-    if(!tjCompress2(jencode, (u8*)screenbuf, *scrw, (*bsiz) * (*scrw), stride[scr], tjpixelformat, &destaddr, (u32*)imgsize, TJSAMP_420, cfgblk[1], TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
+    if(!tjCompress2(jencode, (u8*)screenbuf, *scrw, (*bsiz) * (*scrw), enc_rows, tjpixelformat, &destaddr, (u32*)imgsize, TJSAMP_420, cfgblk[1], TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
     {
 #if DEBUG_VERBOSE==1
         osTickCounterUpdate(&tick_ctr_1);
@@ -1333,21 +1348,36 @@ void newThreadMainFunction(void* __dummy_arg__)
                 }
             }
 
-            // Software interlace (Old 3DS): the o3DS kernel data-aborts on
+            // Software decimation (Old 3DS): the o3DS kernel data-aborts on
             // the gather-stride DMA config hardware interlace needs, so keep
-            // the full-strip DMA and drop every other pixel here instead.
-            // ~0.3 ms/strip decimation buys ~half the encode cost.
+            // the full-strip DMA and drop pixels here instead. Interlace
+            // halves the width (~half the encode cost); quarter-res halves
+            // both axes (~a quarter). Quarter-res wins when both are set.
             bool softInterlaced = false;
-            if(cfgblk[5] && isold && !skipsend && getFormatBpp(format[scr]) == 16)
+            bool softDownscaled = false;
+            if((cfgblk[5] || cfgblk[11]) && isold && !skipsend && getFormatBpp(format[scr]) == 16)
             {
                 u16* px16 = (u16*)screenbuf;
-                u32 halfpx = (240 / 2) * stride[scr];
                 u32 ph = interlacedRowSwitch ? 1 : 0;
-                for(u32 i = 0; i < halfpx; i++)
-                    px16[i] = px16[i * 2 + ph];
+                if(cfgblk[11]) // quarter-res: every other pixel of every other row
+                {
+                    u32 rows = stride[scr] / 2;
+                    for(u32 r = 0; r < rows; r++)
+                        for(u32 i = 0; i < 120; i++)
+                            px16[r * 120 + i] = px16[(r * 2) * 240 + i * 2 + ph];
+                    enc_rows_override = rows;
+                    softDownscaled = true;
+                    // phase still alternates so detail dithers back over time
+                }
+                else // interlace: every other pixel, all rows
+                {
+                    u32 halfpx = (240 / 2) * stride[scr];
+                    for(u32 i = 0; i < halfpx; i++)
+                        px16[i] = px16[i * 2 + ph];
+                    isStoredFrameInterlaced = true;
+                    softInterlaced = true;
+                }
                 scrw = 120;
-                isStoredFrameInterlaced = true;
-                softInterlaced = true;
             }
 
             if(skipsend)
@@ -1427,10 +1457,11 @@ void newThreadMainFunction(void* __dummy_arg__)
             else
             {
                 isStoredFrameInterlaced = false;
-                // Software interlace advances the field phase here, at the
+                // Software decimation advances the sample phase here, at the
                 // same pipeline point the hardware path would.
-                if(softInterlaced)
+                if(softInterlaced || softDownscaled)
                     interlacedRowSwitch = !interlacedRowSwitch;
+                enc_rows_override = 0;
             }
 
             // workaround for DMA Siz Bug (refer to docs)
@@ -1493,11 +1524,12 @@ void newThreadMainFunction(void* __dummy_arg__)
                     // libctru; not defined in the legacy 1.2.1 headers).
                     const double tick2ms = 1000.0 / 268123480.0;
                     int stlen = sprintf((char*)(soc->bufferptr + bufsoc_pak_data_offset),
-                        "sent=%lu skip=%lu\ndma=%.1f crc=%.1f enc=%.1f send=%.1f (ms/s)\nq=%u chunks=%lu",
+                        "sent=%lu skip=%lu\ndma=%.1f crc=%.1f enc=%.1f send=%.1f (ms/s)\nq=%u chunks=%lu mode=%c",
                         (unsigned long)st_sent, (unsigned long)st_skip,
                         st_dma * tick2ms, st_crc * tick2ms,
                         st_enc * tick2ms, st_send * tick2ms,
-                        (unsigned int)cfgblk[1], (unsigned long)limit[scr]);
+                        (unsigned int)cfgblk[1], (unsigned long)limit[scr],
+                        cfgblk[11] ? 'd' : (cfgblk[5] ? 'i' : 'p'));
                     if(stlen > 0)
                     {
                         soc->setPakType(0xFF);
@@ -1869,7 +1901,7 @@ int main()
                     soc->setPakSubtype(0x04);
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
-                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00011111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep
+                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale
                     soc->setPakSize(2);
                     soc->wribuf();
 
