@@ -543,7 +543,7 @@ static void sframe_wrap(bufsoc* s, int scr, u16 x, u16 y, u16 w, u16 h,
 // 0 = 10x60 px (default), 1 = fine 5x30, 2 = coarse 25x120 — widths divide
 // both chunk strides, heights divide 240. Indexed
 // [screen][strip][cellcol][cellseg]; dims sized for the finest preset.
-static u32 cell_crc[2][8][20][8];
+static u32 cell_crc[2][8][20][16]; // [screen][strip][cols≤20][rows≤16]
 static u32* capbuf[2] = {nullptr, nullptr};
 static capmeta cmeta[2];
 
@@ -843,7 +843,7 @@ int netfuncWaitForSettings()
                     return 1;
 
                 case 0x11: // Flurry extension: dirty-grid rows per screen (1/2/4/8)
-                    if((j == 1 || j == 2 || j == 4 || j == 8) && cfgblk[CFG_GRID_ROWS] != j)
+                    if((j == 1 || j == 2 || j == 4 || j == 8 || j == 16) && cfgblk[CFG_GRID_ROWS] != j)
                     {
                         cfgblk[CFG_GRID_ROWS] = j;
                         memset(cell_crc, 0, sizeof(cell_crc));
@@ -1772,7 +1772,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             u32 gcols = cfgblk[CFG_GRID_COLS];
             if(gcols != 4 && gcols != 8 && gcols != 16) gcols = 16;
             u32 grows = cfgblk[CFG_GRID_ROWS];
-            if(grows != 1 && grows != 2 && grows != 4 && grows != 8) grows = 1;
+            if(grows != 1 && grows != 2 && grows != 4 && grows != 8 && grows != 16) grows = 1;
             u32 cw = ((scr == 0) ? 400 : 320) / gcols;
             u32 ch = 240 / grows;
             // Bytes per pixel in the CAPTURED buffer: the DMA squeezes
