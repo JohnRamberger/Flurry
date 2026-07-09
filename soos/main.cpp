@@ -468,6 +468,15 @@ typedef struct
 // destination word; the transfer overwriting it is direct evidence the
 // copy reached the end.
 #define CAP_SENTINEL 0xF1A6F1A6u
+
+// Stage-3 dirty-cell grid: crc32 per cell of each captured full-res strip
+// decides what actually changed; dirty cells coalesce to one bounding rect
+// per strip, shipped raw (RGB565, no encode) when small or as the usual
+// full-strip JPEG when large. Cell size is client-tunable (setting 0x10):
+// 0 = 10x60 px (default), 1 = fine 5x30, 2 = coarse 25x120 — widths divide
+// both chunk strides, heights divide 240. Indexed
+// [screen][strip][cellcol][cellseg]; dims sized for the finest preset.
+static u32 cell_crc[2][8][20][8];
 static u32* capbuf[2] = {nullptr, nullptr};
 static capmeta cmeta[2];
 
@@ -755,6 +764,16 @@ int netfuncWaitForSettings()
 
                 case 0x0F: // Flurry extension: protocol v2 (SFRAME) framing
                     cfgblk[15] = j?1:0;
+                    return 1;
+
+                case 0x10: // Flurry extension: dirty-cell size preset
+                           // (0 = 10x60, 1 = fine 5x30, 2 = coarse 25x120)
+                    if(j <= 2 && cfgblk[16] != j)
+                    {
+                        cfgblk[16] = j;
+                        // Geometry changed: all stored cell crcs are stale.
+                        memset(cell_crc, 0, sizeof(cell_crc));
+                    }
                     return 1;
 
                 default:
@@ -1210,6 +1229,7 @@ void newThreadMainFunction(void* __dummy_arg__)
     // Fresh connection: forget strip crcs, pacing, and capture route state.
     memset(strip_crc, 0, sizeof(strip_crc));
     memset(strip_age, 0, sizeof(strip_age));
+    memset(cell_crc, 0, sizeof(cell_crc));
     pace_last = 0;
     last_route = 0;
     import_fail_reported = false;
@@ -1551,7 +1571,117 @@ void newThreadMainFunction(void* __dummy_arg__)
             // expensive encode + send when nothing changed, unless the
             // refresh interval forces a resend.
             bool skipsend = dma_torn; // torn strips are dropped, not encoded
-            if(!dma_torn && cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
+
+            // ---- Stage 3: dirty-cell grid (v2 + skip, 16bpp, full-res). ----
+            // Replaces the strip-level crc below when active. Runs on the
+            // pre-decimation capture, so static content skips regardless of
+            // the interlace/quarter sample phase. Cell geometry from the
+            // client preset (cfgblk[16]).
+            u32 cw = 10, ch = 60;
+            if(cfgblk[16] == 1) { cw = 5;  ch = 30;  }
+            if(cfgblk[16] == 2) { cw = 25; ch = 120; }
+            bool v2cells = cfgblk[15] && cfgblk[6] && !dma_torn && !hwInterlaced
+                && getFormatBpp(format[scr]) == 16
+                && (stride[scr] % cw == 0) && (stride[scr] / cw) <= 20;
+            bool v2raw_built = false;
+            if(v2cells)
+            {
+                u32 cellcols = stride[scr] / cw;
+                u32 cellsegs = 240 / ch;
+                int minr = 127, maxr = -1, mins = 127, maxs = -1;
+                st_t0 = svcGetSystemTick();
+                for(u32 cr = 0; cr < cellcols; cr++)
+                {
+                    for(u32 cs = 0; cs < cellsegs; cs++)
+                    {
+                        u32 c = 0;
+                        for(u32 rr = 0; rr < cw; rr++)
+                        {
+                            const u8* p = (const u8*)screenbuf
+                                + (((cr * cw) + rr) * 240 + cs * ch) * 2;
+                            c = crc32(c, (const Bytef*)p, ch * 2);
+                        }
+                        u32* slot = &cell_crc[scr][cap_strip & 7][cr][cs];
+                        if(*slot != c)
+                        {
+                            *slot = c;
+                            if((int)cr < minr) minr = (int)cr;
+                            if((int)cr > maxr) maxr = (int)cr;
+                            if((int)cs < mins) mins = (int)cs;
+                            if((int)cs > maxs) maxs = (int)cs;
+                        }
+                    }
+                }
+                st_crc += svcGetSystemTick() - st_t0;
+
+                // The strip-level refresh interval still bounds staleness.
+                u8* age = &strip_age[0][scr][cap_strip & 7];
+                if(maxr < 0)
+                {
+                    if(cfgblk[7] && *age >= cfgblk[7])
+                    {
+                        minr = 0; maxr = (int)cellcols - 1;
+                        mins = 0; maxs = (int)cellsegs - 1;
+                        *age = 0;
+                    }
+                    else
+                    {
+                        if(*age < 0xFF) (*age)++;
+                        skipsend = true;
+                    }
+                }
+                else
+                {
+                    *age = 0;
+                }
+
+                // Small dirty rect: ship raw RGB565 (no encode, full res).
+                // Large: fall through to the normal full-strip JPEG.
+                if(maxr >= 0)
+                {
+                    u32 w_cols = (u32)(maxr - minr + 1) * cw;
+                    u32 h_px = (u32)(maxs - mins + 1) * ch;
+                    u32 rawbytes = w_cols * h_px * 2;
+                    if(rawbytes <= 12 * 1024 && (int)(rawbytes + 26) < soc->bufsize)
+                    {
+                        u8* b = soc->bufferptr;
+                        b[0] = 0x90; // SFRAME
+                        b[1] = (u8)scr;
+                        b[2] = (u8)(v2_seq & 0xFF);
+                        b[3] = (u8)(v2_seq >> 8);
+                        v2_seq++;
+                        soc->setPakSize(4 + 14 + rawbytes);
+                        b[8] = 0;  // pass_flags
+                        b[9] = 1;  // region_count
+                        b[10] = 0;
+                        b[11] = 0;
+                        u8* rh = b + 12;
+                        u16 rx = (u16)(strip_x + (u32)minr * cw);
+                        u16 ry = (u16)((cellsegs - 1 - (u32)maxs) * ch);
+                        rh[0] = rx & 0xFF; rh[1] = rx >> 8;
+                        rh[2] = ry & 0xFF; rh[3] = ry >> 8;
+                        rh[4] = w_cols & 0xFF; rh[5] = (w_cols >> 8) & 0xFF;
+                        rh[6] = h_px & 0xFF; rh[7] = (h_px >> 8) & 0xFF;
+                        rh[8] = 0; // codec: raw RGB565
+                        rh[9] = 0; // progressive, full-res
+                        rh[10] = rawbytes & 0xFF;
+                        rh[11] = (rawbytes >> 8) & 0xFF;
+                        rh[12] = (rawbytes >> 16) & 0xFF;
+                        rh[13] = (rawbytes >> 24) & 0xFF;
+                        u8* dst = b + 26;
+                        for(u32 col = 0; col < w_cols; col++)
+                        {
+                            const u8* src = (const u8*)screenbuf
+                                + ((((u32)minr * cw) + col) * 240 + (u32)mins * ch) * 2;
+                            memcpy(dst, src, h_px * 2);
+                            dst += h_px * 2;
+                        }
+                        v2raw_built = true;
+                    }
+                }
+            }
+
+            if(!v2cells && !dma_torn && cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
             {
                 u32 crclen = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
                 if(hwInterlaced)
@@ -1593,7 +1723,8 @@ void newThreadMainFunction(void* __dummy_arg__)
             // both axes (~a quarter). Quarter-res wins when both are set.
             bool softInterlaced = false;
             bool softDownscaled = false;
-            if((cfgblk[5] || cfgblk[11]) && isold && !skipsend && getFormatBpp(format[scr]) == 16)
+            if((cfgblk[5] || cfgblk[11]) && isold && !skipsend && !v2raw_built
+               && getFormatBpp(format[scr]) == 16)
             {
                 u16* px16 = (u16*)screenbuf;
                 u32 ph = interlacedRowSwitch ? 1 : 0;
@@ -1619,7 +1750,11 @@ void newThreadMainFunction(void* __dummy_arg__)
 
             bool frameInterlaced = hwInterlaced || softInterlaced;
 
-            if(skipsend)
+            if(v2raw_built)
+            {
+                // Raw dirty-rect SFRAME already sits in the buffer.
+            }
+            else if(skipsend)
             {
                 // Suppress the send below; the pipeline (strip increment,
                 // screen switch, next DMA) still advances.
@@ -1648,8 +1783,9 @@ void newThreadMainFunction(void* __dummy_arg__)
             //printf("interlace_px_offset = %i\n", interlace_px_offset);
 
             // legacy chunk index on o3DS (strip advance now lives in the
-            // capture scheduler)
-            if(isold){
+            // capture scheduler). Never touch a built SFRAME: byte 2 is its
+            // sequence number.
+            if(isold && !v2raw_built){
                 soc->setPakSubtypeB(0b00001000 + cap_strip);
             }
 
@@ -1658,7 +1794,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             // offset (bytes 4..8), so wribuf() sends it unchanged; the
             // data moves from the legacy payload offset (+8) to after the
             // pass + region headers (+26). TGA stays on legacy framing.
-            if(cfgblk[15] && !skipsend && cfgblk[4] == 0 && soc->getPakSize())
+            if(cfgblk[15] && !skipsend && !v2raw_built && cfgblk[4] == 0 && soc->getPakSize())
             {
                 u32 dlen = soc->getPakSize();
                 u8* b = soc->bufferptr;
@@ -1785,6 +1921,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 offs[1] = 0;
                 memset(strip_crc, 0, sizeof(strip_crc));
                 memset(strip_age, 0, sizeof(strip_age));
+                memset(cell_crc, 0, sizeof(cell_crc));
                 if(soc)
                     soc->errformat((char*)"chunks: now %u per screen", (unsigned int)limit[0]);
             }
@@ -2122,7 +2259,8 @@ int main()
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
                     soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b11111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale | stats-toggle | protocol-v2
-                    soc->setPakSize(2);
+                    soc->bufferptr[bufsoc_pak_data_offset + 2] = 0b00000001; // features2: cell-size setting
+                    soc->setPakSize(3);
                     soc->wribuf();
 
                     netthread = threadCreate(newThreadMainFunction, nullptr, netfunc_thread_stack_siz, netfunc_thread_priority, netfunc_thread_cpu, true);
