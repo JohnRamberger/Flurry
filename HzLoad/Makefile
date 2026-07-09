@@ -66,6 +66,11 @@ CFLAGS	:=	-g -Wall -O2 -mword-relocations \
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__
 
+# Display version (shown in the loader UI and in the stream); CI passes the
+# release tag / git describe output.
+FLURRY_VERSION ?= dev
+CFLAGS += -DFLURRY_VERSION=\"$(FLURRY_VERSION)\"
+
 ifneq ($(strip $(HIMEM)),)
 CFLAGS += -D_HIMEM
 endif
