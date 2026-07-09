@@ -49,7 +49,7 @@ APP_UNIQUE_ID   :=  $(shell echo $(APP_UNIQUE_ID) | cut -c1-8)
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard
 
-CFLAGS	:=	-g -Wall -Wno-format -O0 -mword-relocations \
+CFLAGS	:=	-g -Wall -Wno-format -O2 -mword-relocations \
 			-fomit-frame-pointer -ffast-math \
 			$(ARCH)
 
