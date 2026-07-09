@@ -260,12 +260,15 @@ public:
         int offs = 0;
         int ret = 0;
 
+        // Send as much as possible per call. Each send() is an IPC into the
+        // soc service (~5 ms), so the old 4 KB chunking cost one IPC per
+        // 4 KB — a 40 KB packet = 10 IPCs. Cap at 56 KB (< the 64 KB soc
+        // service buffer); TCP returns a partial count and the loop
+        // continues, so large writes are safe.
         while(mustwri)
         {
-            if(mustwri >> 12)
-                ret = send(socketid, &(bufferptr[offs]), 0x1000, flags);
-            else
-                ret = send(socketid, &(bufferptr[offs]), mustwri, flags);
+            u32 chunk = mustwri > 0xE000 ? 0xE000 : mustwri;
+            ret = send(socketid, &(bufferptr[offs]), chunk, flags);
             if(ret < 0) return -errno;
             mustwri -= ret;
             offs += ret;
