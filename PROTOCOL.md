@@ -256,3 +256,57 @@ bit 3 = TGA (0 = JPEG), bit 4 = screen (0 top, 1 bottom), bit 5 = interlaced,
 bit 6 = interlace row phase. On Old 3DS, `subtypeB` = `0b00001000 + chunk_index`
 (chunks 0–7); frames are split into 8 strips with a 5 ms sleep per chunk, and
 interlacing is disabled. Defaults: quality 70, top screen, JPEG.
+
+### A.1 Flurry legacy extensions (normative, interim)
+
+Extensions the Flurry sysmodule and client add on top of the legacy protocol
+until the v2 rewrite. Both directions stay compatible with pre-extension
+peers: unknown setting subtypes are ignored by old sysmodules, and old
+clients ignore the announce packet.
+
+**Announce** — sent once by extended sysmodules immediately after the client
+connects: type `0xFF`, subtype `0x04`, payload
+`[announce_rev: u8][features: u8]`. Feature bits: bit 0 = strip skip,
+bit 1 = fps cap, bit 2 = Old-3DS interlace. A client that has not received
+an announce within ~1 s must assume a pre-extension sysmodule and only use
+subtypes 0x01–0x05.
+
+**New settings** (type `0x04`, u8 payload each):
+
+| Subtype | Setting | Payload |
+|---------|---------|---------|
+| 0x06 | Strip skip | bool — don't send strips whose content (crc32) is unchanged |
+| 0x07 | Refresh interval | force-send every N frames per strip, 0 = never |
+| 0x08 | FPS cap | target fps, 0 = uncapped |
+
+Strip skip requires the client to keep a persistent per-screen buffer (a
+skipped strip simply stays stale until it changes or the refresh interval
+forces it). The refresh interval bounds how long a lost/corrupt strip can
+stay wrong.
+
+## Appendix B: v2 transport direction (design notes, non-normative)
+
+Decided direction for the protocol rewrite, pending one hardware
+measurement:
+
+- **Hybrid transport**: TCP :6464 for control (HELLO, config, stats,
+  receiver reports) + **UDP for frames**. Video is perishable; TCP
+  head-of-line blocking turns WiFi loss into freezes. Strips are already
+  datagram-sized (~1–3 KB JPEG ≤ 2× 1400-byte datagrams); a lost datagram
+  = one stale strip, healed by the refresh interval against the client's
+  persistent screen buffer.
+- **Datagram header**: `[frame_id][screen][strip][frag/frag_count]` so the
+  client can paste strips in any order.
+- **Client sends the first datagram** (hole punch) so 3DS→client traffic
+  traverses the client firewall as established.
+- **Backpressure replacement**: without TCP, the 3DS is blind to loss.
+  Client sends periodic receiver reports (received/lost counts) over the
+  TCP channel; the sysmodule's adaptive rate control uses loss% + encode
+  time to auto-tune quality/interlace toward a user-set target
+  (quality-priority ↔ fps-priority).
+- **Gate**: socket ops are IPC calls into the `nwm` sysmodule; one 12 KB
+  TCP send ≈ 1 IPC vs ~9 UDP sendto ≈ 9 IPCs. Before committing, benchmark
+  on hardware: blast N MB via TCP vs 1400-byte UDP datagrams, compare CPU
+  time per MB. If UDP overhead is unacceptable, fall back to TCP with
+  strip skip + small send buffer (bounds staleness), which keeps most of
+  the win.

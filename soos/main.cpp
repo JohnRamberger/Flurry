@@ -61,6 +61,7 @@ extern "C"
 
 #include "tga/targa.h"
 #include <turbojpeg.h>
+#include <zlib.h> // crc32, for skipping unchanged strips
 }
 
 #include <exception>
@@ -434,6 +435,14 @@ static bool interlacedRowSwitch = false;
 static bool isStoredFrameInterlaced = false;
 static bool isDmaSetForInterlaced = false;
 
+// Flurry extension state (PROTOCOL.md A.1).
+// crc32 of the last-sent content per [interlace phase][screen][strip],
+// plus a frames-since-last-sent age per strip for the refresh interval.
+static u32 strip_crc[2][2][8];
+static u8 strip_age[2][2][8];
+// osGetTime() of the previous paced iteration (fps cap, cfgblk[8]).
+static u64 pace_last = 0;
+
 // Based on (and slightly modified from) devkitpro/libctru source
 //
 // svcSetResourceLimitValues(Handle res_limit, LimitableResource* resource_type_list, s64* resource_list, u32 count)
@@ -673,6 +682,18 @@ int netfuncWaitForSettings()
                     {
                         cfgblk[5] = j;
                     }
+                    return 1;
+
+                case 0x06: // Flurry extension: skip unchanged strips (crc32)
+                    cfgblk[6] = j?1:0;
+                    return 1;
+
+                case 0x07: // Flurry extension: strip refresh interval (frames; 0 = never force)
+                    cfgblk[7] = j;
+                    return 1;
+
+                case 0x08: // Flurry extension: fps cap (0 = uncapped)
+                    cfgblk[8] = (j > 60) ? 60 : j;
                     return 1;
 
                 default:
@@ -1040,6 +1061,11 @@ void newThreadMainFunction(void* __dummy_arg__)
 
     threadrunning = 1;
 
+    // Fresh connection: forget strip crcs and pacing from the previous one.
+    memset(strip_crc, 0, sizeof(strip_crc));
+    memset(strip_age, 0, sizeof(strip_age));
+    pace_last = 0;
+
     if(isold == 0){
         osSetSpeedupEnable(1);
     }
@@ -1177,6 +1203,47 @@ void newThreadMainFunction(void* __dummy_arg__)
                 scrw = scrw / 2;
             }
 
+            // Flurry extension: skip unchanged strips (PROTOCOL.md A.1).
+            // screenbuf holds the strip DMA'd last iteration for screen
+            // `scr`, strip `offs[scr]`. crc32 it (cheap; ~100µs) and skip
+            // the expensive encode + send when nothing changed, unless the
+            // refresh interval forces a resend.
+            bool skipsend = false;
+            if(cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
+            {
+                u32 crclen = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
+                if(isStoredFrameInterlaced)
+                    crclen /= 2;
+                // Never crc past the screenbuf allocation (sized for 24bpp).
+                u32 crccap = stride[scr] * 240 * 3;
+                if(crclen > crccap)
+                    crclen = crccap;
+
+                u32 c = crc32(0L, (const Bytef*)screenbuf, crclen);
+                int phase = (isStoredFrameInterlaced && interlacedRowSwitch) ? 1 : 0;
+                u32* stored = &strip_crc[phase][scr][offs[scr] & 0b111];
+                u8* age = &strip_age[phase][scr][offs[scr] & 0b111];
+
+                if(*stored == c && (cfgblk[7] == 0 || *age < cfgblk[7]))
+                {
+                    if(*age < 0xFF)
+                        (*age)++;
+                    skipsend = true;
+                }
+                else
+                {
+                    *stored = c;
+                    *age = 0;
+                }
+            }
+
+            if(skipsend)
+            {
+                // Suppress the send below; the pipeline (strip increment,
+                // screen switch, next DMA) still advances.
+                soc->setPakSize(0);
+            }
+            else
             switch(cfgblk[4])
             {
             case 0:
@@ -1289,8 +1356,20 @@ void newThreadMainFunction(void* __dummy_arg__)
 #endif
             }
 
-            // TODO: Fine-tune Old-3DS performance.
-            if(isold){
+            // Frame pacing. With an fps cap (Flurry extension, cfgblk[8]),
+            // pace iterations so full frames hit the target rate; otherwise
+            // keep the legacy fixed Old-3DS sleep.
+            if(cfgblk[8])
+            {
+                u32 iters_per_frame = limit[scr] * ((cfgblk[3] == 3) ? 2 : 1);
+                u64 gap_ms = 1000 / ((u32)cfgblk[8] * iters_per_frame);
+                u64 now = osGetTime();
+                if(pace_last && now >= pace_last && (now - pace_last) < gap_ms)
+                    svcSleepThread((gap_ms - (now - pace_last)) * 1000000ULL);
+                pace_last = osGetTime();
+            }
+            else if(isold){
+                // TODO: Fine-tune Old-3DS performance.
                 svcSleepThread(5e6);
                 // 5 x 10 ^ 6 nanoseconds (iirc)
             }
@@ -1351,10 +1430,6 @@ int main()
 
     soc = nullptr;
 
-    // cfgblk sane defaults
-    cfgblk[1] = 70;
-    cfgblk[3] = 1;
-
 #if DEBUG_BASIC==1
     f = fopen("Flurry.log", "a");
     if((int)f <= 0) f = nullptr;
@@ -1372,6 +1447,13 @@ int main()
     memset(&pat, 0, sizeof(pat));
     memset(&capin, 0, sizeof(capin));
     memset(cfgblk, 0, sizeof(cfgblk));
+
+    // cfgblk sane defaults. NOTE: must come after the memset above (they
+    // used to be set before it and were silently wiped; clients that send
+    // settings before Init masked that).
+    cfgblk[1] = 70; // JPEG quality
+    cfgblk[3] = 1;  // top screen
+    cfgblk[7] = 64; // strip-skip refresh interval (frames)
 
     u32 soc_service_buf_siz = 0;
     u32 screenbuf_siz = 0;
@@ -1583,6 +1665,17 @@ int main()
                 {
                     soc = new bufsoc(cli, bufsoc_siz);
                     k = soc->pack();
+
+                    // Flurry extension: announce our feature set so extended
+                    // clients unlock the new settings (PROTOCOL.md A.1).
+                    // Pre-extension clients log/ignore unknown 0xFF packets.
+                    soc->setPakType(0xFF);
+                    soc->setPakSubtype(0x04);
+                    soc->setPakSubtypeB(0);
+                    soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
+                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00000011; // strip-skip | fps-cap
+                    soc->setPakSize(2);
+                    soc->wribuf();
 
                     netthread = threadCreate(newThreadMainFunction, nullptr, netfunc_thread_stack_siz, netfunc_thread_priority, netfunc_thread_cpu, true);
 
