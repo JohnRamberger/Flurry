@@ -459,7 +459,11 @@ typedef struct
     u8 hwil;     // hardware-interlaced capture (New 3DS)
     u16 strip_x; // screen-space x of the strip
     u32 dlen;    // destination byte count (for the completion sentinel)
+    u64 t_start; // system tick at DMA start (for the transfer-time EMA)
 } capmeta;
+
+// EMA of measured transfer durations in system ticks (0 = unknown yet).
+static u64 dma_ema_ticks = 0;
 
 // Completion sentinel: svcGetDmaState is unreliable for inter-process DMA
 // on Old 3DS (it can fail outright), and trusting a fixed settle stops slow
@@ -1233,6 +1237,7 @@ void newThreadMainFunction(void* __dummy_arg__)
     pace_last = 0;
     last_route = 0;
     import_fail_reported = false;
+    dma_ema_ticks = 0;
 
     if(isold == 0){
         osSetSpeedupEnable(1);
@@ -1394,8 +1399,22 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // or lie for inter-process handles on Old 3DS.
                 volatile u32* sentinel =
                     (volatile u32*)&capbuf[cap_pending][(cmeta[cap_pending].dlen / 4) - 1];
-                bool done = false;
-                for(int i = 0; i < 800; i++)
+                bool done = (*sentinel != CAP_SENTINEL);
+
+                // Sleep most of the expected remaining transfer time in one
+                // go (EMA of measured durations) instead of hundreds of
+                // 50 µs polls whose real granularity is ~2-4x that.
+                if(!done && dma_ema_ticks)
+                {
+                    u64 elapsed = svcGetSystemTick() - cmeta[cap_pending].t_start;
+                    if(elapsed < dma_ema_ticks)
+                    {
+                        u64 remain_ns = (dma_ema_ticks - elapsed) * 1000000000ULL / 268123480ULL;
+                        if(remain_ns > 300000)
+                            svcSleepThread(remain_ns - 150000);
+                    }
+                }
+                for(int i = 0; !done && i < 800; i++)
                 {
                     if(*sentinel != CAP_SENTINEL)
                     {
@@ -1418,6 +1437,9 @@ void newThreadMainFunction(void* __dummy_arg__)
                 st_dma += svcGetSystemTick() - st_t0;
                 if(done)
                 {
+                    // Track how long transfers really take (start → done).
+                    u64 took = svcGetSystemTick() - cmeta[cap_pending].t_start;
+                    dma_ema_ticks = dma_ema_ticks ? (dma_ema_ticks * 3 + took) / 4 : took;
                     ready = cap_pending;
                     have_ready = true;
                 }
@@ -1499,6 +1521,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                     {
                         dmafail_reported = false;
                         m->valid = 1;
+                        m->t_start = svcGetSystemTick();
                         cap_pending = nxt;
                     }
 
