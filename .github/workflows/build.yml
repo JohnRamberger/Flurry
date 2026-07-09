@@ -213,6 +213,24 @@ jobs:
             HzLoad/FlurryLoad.cia \
             HzLoad/FlurryLoad_HIMEM.cia
 
+      # Nightlies are disposable: keep only the newest prerelease. GitHub's
+      # release list is name-ordered (v0.1.1.9 outranks v0.1.1.10), and
+      # Universal-Updater's downloadRelease takes the first list entry, so
+      # stale prereleases must go. Tags are kept — the prerelease counter
+      # derives N from existing tags and must stay monotonic.
+      - name: Prune older prereleases
+        if: steps.ver.outputs.prerelease == 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          gh release list --limit 100 --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' \
+            | { grep -vx "$tag" || true; } \
+            | while read -r t; do
+                echo "Deleting stale prerelease $t"
+                gh release delete "$t" --yes
+              done
+
       # Re-stamp the UniStore with the current release tags so Universal-Updater
       # can display versions and detect updates. Pushed back to main with
       # [skip ci] so it does not trigger another build/release cycle.
