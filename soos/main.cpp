@@ -2213,13 +2213,15 @@ void newThreadMainFunction(void* __dummy_arg__)
                     svcSleepThread((gap_ms - (now - pace_last)) * 1000000ULL);
                 pace_last = osGetTime();
             }
-            else if(isold){
-                // Legacy fixed pause between strips, now tunable (Flurry
-                // extension setting 0x0A -> cfgblk[CFG_SLEEP], ms; 0 disables).
-                // Gives syscore services (nwm/WiFi) breathing room; lower
-                // at your own risk.
-                if(cfgblk[CFG_SLEEP])
-                    svcSleepThread((u64)cfgblk[CFG_SLEEP] * 1000000ULL);
+            else {
+                // Uncapped: the tunable Old-3DS pause (setting 0x0A), but
+                // never zero — a ~0.3 ms floor yield keeps the audio system
+                // thread on syscore fed. Without it, active streaming pegs
+                // the core and audio buffers underrun (crackle while
+                // connected). n3DS gets only the floor.
+                u64 ns = isold ? (u64)cfgblk[CFG_SLEEP] * 1000000ULL : 0;
+                if(ns < 3e5) ns = 3e5;
+                svcSleepThread(ns);
             }
         }
         else
