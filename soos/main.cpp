@@ -1365,9 +1365,12 @@ void newThreadMainFunction(void* __dummy_arg__)
                 st_t0 = svcGetSystemTick();
                 u32 c = crc32(0L, (const Bytef*)screenbuf, crclen);
                 st_crc += svcGetSystemTick() - st_t0;
-                // Slot per interlace field so both fields of a changed strip
-                // get sent (covers hardware and software interlace alike).
-                int phase = (cfgblk[5] && interlacedRowSwitch) ? 1 : 0;
+                // Slot per decimation phase: interlace fields AND quarter-res
+                // sample phases produce two alternating contents for the same
+                // static strip; sharing one slot made them fight (crc A vs B
+                // mismatch every pass = endless resends of static screens,
+                // seen as bottom fps ~5 in quarter-res benchmarks).
+                int phase = ((cfgblk[5] || cfgblk[11]) && interlacedRowSwitch) ? 1 : 0;
                 u32* stored = &strip_crc[phase][scr][offs[scr] & 0b111];
                 u8* age = &strip_age[phase][scr][offs[scr] & 0b111];
 
