@@ -442,6 +442,26 @@ static bool dmafail_reported = false;
 // Protocol v2: SFRAME sequence number, increments per sent pass.
 static u16 v2_seq = 0;
 
+// Double-buffered capture. The strip DMA takes 10-20 ms on Old 3DS (the
+// legacy async pipeline existed to hide it under the encode of the previous
+// strip — "dma=0.3 ms/s" was overlap, not speed; a fully synchronous loop
+// starves at <1 fps with mid-copy aborts wedging DMA channels). Each buffer
+// carries the metadata of the strip captured INTO it, so labels can never
+// desync from content — the failure mode of the legacy shared-state
+// pipeline (flicker / shuffled slices).
+typedef struct
+{
+    u8 scr;
+    u8 strip;
+    u8 phase;    // decimation sample phase / interlace field at capture
+    u8 fmt;      // GSP format snapshot (low 3 bits)
+    u8 valid;    // a DMA was successfully started into this buffer
+    u8 hwil;     // hardware-interlaced capture (New 3DS)
+    u16 strip_x; // screen-space x of the strip
+} capmeta;
+static u32* capbuf[2] = {nullptr, nullptr};
+static capmeta cmeta[2];
+
 // Flurry extension state (PROTOCOL.md A.1).
 // crc32 of the last-sent content per [interlace phase][screen][strip],
 // plus a frames-since-last-sent age per strip for the refresh interval.
@@ -811,12 +831,15 @@ int allocateScreenbufMem(u32** myscreenbuf)
         screenbuf_siz = 400 * 240 * 3;
     }
 
+    // Double-buffered capture: two independent allocations (no contiguity
+    // requirement between them).
     int i = 0;
-    while(i < 5 && (!*myscreenbuf) )
+    while(i < 5 && (!capbuf[0] || !capbuf[1]))
     {
-        *myscreenbuf = (u32*)memalign(8, screenbuf_siz);
+        if(!capbuf[0]) capbuf[0] = (u32*)memalign(8, screenbuf_siz);
+        if(!capbuf[1]) capbuf[1] = (u32*)memalign(8, screenbuf_siz);
 
-        if(!*myscreenbuf)
+        if(!capbuf[0] || !capbuf[1])
         {
             debugPrint(1, "memalign failed, retrying...");
             makerave();
@@ -825,15 +848,18 @@ int allocateScreenbufMem(u32** myscreenbuf)
         i++;
     }
 
-    if(!*myscreenbuf)
+    if(!capbuf[0] || !capbuf[1])
     {
+        if(capbuf[0]) { free(capbuf[0]); capbuf[0] = nullptr; }
+        if(capbuf[1]) { free(capbuf[1]); capbuf[1] = nullptr; }
         debugPrint(1, "Error: out of memory (memalign failed trying to allocate memory for screenbuf)");
         return -1;
     }
-    else
-    {
-        return 0;
-    }
+
+    cmeta[0].valid = 0;
+    cmeta[1].valid = 0;
+    *myscreenbuf = capbuf[0];
+    return 0;
 }
 
 void makeTargaImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u32* bits, int* imgsize, u32* myformat, bool isInterlaced, bool interlacedRowSwitch)
@@ -1151,6 +1177,9 @@ void newThreadMainFunction(void* __dummy_arg__)
     u64 st_epoch_ms = osGetTime();
     u64 st_t0 = 0;
 
+    // Index of the capture buffer with a DMA in flight (-1 = none).
+    int cap_pending = -1;
+
     u32 siz = 0x80;
     u32 bsiz = 1;
     u32 scrw = 2;
@@ -1322,99 +1351,146 @@ void newThreadMainFunction(void* __dummy_arg__)
             // with the wrong screen/index — flicker, shuffled slices. The
             // overlap it bought was worth ~0.3 ms/s (measured). ----
 
-            u32 region_siz = capin.screencapture[scr].framebuf_widthbytesize * stride[scr];
-            // Screen-space x of this strip (1 fb row = 1 screen column),
-            // recorded before offs advances — used by the v2 region header.
-            u32 strip_x = offs[scr] * stride[scr];
-            bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240; // bytes per pixel (dumb)
-            scrw = 240; // sure
-            bits = 4 << bsiz; // bpp (dumb)
-
-            Handle prochand = 0;
-            if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
-
-            u32 srcprochand = prochand ? prochand : 0xFFFF8001;
-            u8* srcaddr = (u8*)capin.screencapture[scr].framebuf0_vaddr + (region_siz * offs[scr]);
-
-#if DEBUG_VERBOSE==1
-            osTickCounterUpdate(&tick_ctr_2_dma);
-#endif
-
-            siz = (getFormatBpp(format[scr]) / 8) * scrw * stride[scr];
-
-            // Hardware (DMA) interlace: capture one field of this frame.
-            bool hwInterlaced = false;
-            if(isDmaSetForInterlaced)
+            // ---- Double-buffered capture ----
+            // 1) Finish the transfer started last iteration (it has had a
+            //    whole encode+send to complete, so this is normally instant).
+            bool have_ready = false;
+            int ready = -1;
+            if(cap_pending >= 0 && cmeta[cap_pending].valid)
             {
-                hwInterlaced = true;
-                siz = siz / 2;
-                if(interlacedRowSwitch)
-                    srcaddr += getFormatBpp(format[scr])/8;
-            }
-
-            // workaround for DMA Siz Bug (refer to docs)
-            siz += (getFormatBpp(format[scr])/8) * (16 * stride[scr] - 16);
-
-            st_t0 = svcGetSystemTick();
-            int ret_dma = svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr]);
-
-            bool dma_torn;
-            if(ret_dma < 0)
-            {
-                procid = 0;
-                format[scr] = 0xF00FCACE; //invalidate
-                dma_torn = true; // nothing valid captured this pass
-                // Every strip silently dropping here = a dead stream with
-                // no symptom; tell the client once per failure streak.
-                if(soc && !dmafail_reported)
-                {
-                    dmafail_reported = true;
-                    soc->errformat((char*)"capture: dma start failed, ret=%08X src=%08X siz=%u",
-                                   (u32)ret_dma, (u32)srcaddr, (unsigned int)siz);
-                }
-            }
-            else
-            {
-                dmafail_reported = false;
+                st_t0 = svcGetSystemTick();
                 int dmaState = -1;
-                for(int i = 0; i < 100; i++)
+                for(int i = 0; i < 400; i++)
                 {
                     if(svcGetDmaState(&dmaState, dmahand) < 0)
                     {
-                        // Old-3DS kernels can fail this query outright for
-                        // inter-process DMA handles (the legacy code
-                        // ignored the result, read its stale 0 and raced
-                        // the transfer). Trust the copy after a fixed
-                        // settle instead: a strip completes in well under
-                        // a millisecond.
-                        svcSleepThread(1e6);
+                        // Old-3DS kernels can fail this query for
+                        // inter-process DMA handles (legacy ignored the
+                        // result and raced the transfer). A short settle
+                        // covers any remainder.
+                        svcSleepThread(2e6);
                         dmaState = 4;
                         break;
                     }
-                    // 4 = DMASTATE_DONE. 0 also reads as done, but only
-                    // trust it after one poll interval: a just-started
-                    // transfer can report 0 before dispatch, and stopping
-                    // it then cancels the copy entirely.
                     if(dmaState == 4 || (i > 0 && dmaState == 0))
                         break;
-                    svcSleepThread(5e4); // Going higher (5e6, for example) may result in crashes.
+                    svcSleepThread(5e4);
                 }
                 tryStopDma(&dmahand);
-                // Still unfinished after the budget: buffer is torn — drop
-                // the strip rather than encode mixed content.
-                dma_torn = (dmaState != 4 && dmaState != 0);
-#if DEBUG_BASIC==1
-                if(dma_torn)
-                    printf("DMA transfer not finished, stopping manually...\ndmaState=%i\n", dmaState);
-#endif
+                st_dma += svcGetSystemTick() - st_t0;
+                if(dmaState == 4 || dmaState == 0)
+                {
+                    ready = cap_pending;
+                    have_ready = true;
+                }
+                // else: torn — dropped; the scheduler has already moved on.
+                cap_pending = -1;
             }
-            st_dma += svcGetSystemTick() - st_t0;
 
-            if(prochand)
+            // 2) Schedule the next capture into the other buffer from the
+            //    CURRENT scheduler state, then advance that state. The
+            //    metadata freezes everything the processing side needs, so
+            //    labels travel with the pixels.
             {
-                svcCloseHandle(prochand);
-                prochand = 0;
+                int nxt = (ready == 0) ? 1 : 0;
+                capmeta* m = &cmeta[nxt];
+                m->scr = (u8)scr;
+                m->strip = (u8)offs[scr];
+                m->phase = interlacedRowSwitch ? 1 : 0;
+                m->fmt = (u8)(format[scr] & 0b111);
+                m->hwil = isDmaSetForInterlaced ? 1 : 0;
+                m->strip_x = (u16)(offs[scr] * stride[scr]);
+                m->valid = 0;
+
+                if(format[scr] != 0xF00FCACE)
+                {
+                    u32 region_siz = capin.screencapture[scr].framebuf_widthbytesize * stride[scr];
+
+                    Handle prochand = 0;
+                    if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
+                    u32 srcprochand = prochand ? prochand : 0xFFFF8001;
+                    u8* srcaddr = (u8*)capin.screencapture[scr].framebuf0_vaddr + (region_siz * offs[scr]);
+
+                    u32 siz2 = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
+                    if(m->hwil)
+                    {
+                        siz2 = siz2 / 2;
+                        if(m->phase)
+                            srcaddr += getFormatBpp(format[scr]) / 8;
+                    }
+                    // workaround for DMA Siz Bug (refer to docs)
+                    siz2 += (getFormatBpp(format[scr]) / 8) * (16 * stride[scr] - 16);
+
+                    int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
+                    if(ret_dma < 0)
+                    {
+                        procid = 0;
+                        format[scr] = 0xF00FCACE; //invalidate
+                        if(soc && !dmafail_reported)
+                        {
+                            dmafail_reported = true;
+                            soc->errformat((char*)"capture: dma start failed, ret=%08X src=%08X siz=%u",
+                                           (u32)ret_dma, (u32)srcaddr, (unsigned int)siz2);
+                        }
+                    }
+                    else
+                    {
+                        dmafail_reported = false;
+                        m->valid = 1;
+                        cap_pending = nxt;
+                    }
+
+                    if(prochand)
+                    {
+                        svcCloseHandle(prochand);
+                        prochand = 0;
+                    }
+                }
+
+                // Advance the scheduler. Decimation pairs field B of the
+                // SAME strip right after field A; everything else moves to
+                // the next strip / screen.
+                bool willDecimate = m->hwil
+                    || (isold && (cfgblk[5] || cfgblk[11]) && getFormatBpp(format[scr]) == 16);
+                if(willDecimate && m->phase == 0)
+                {
+                    interlacedRowSwitch = true; // field B of this strip next
+                }
+                else
+                {
+                    interlacedRowSwitch = false;
+                    offs[scr]++;
+                    if(offs[scr] >= limit[scr])
+                        offs[scr] = 0;
+                    if(cfgblk[3] == 1) // Top Screen Only
+                        scr = 0;
+                    else if(cfgblk[3] == 2) // Bottom Screen Only
+                        scr = 1;
+                    else if(cfgblk[3] == 3) // Both Screens
+                        scr = !scr;
+                }
             }
+
+            if(!have_ready)
+            {
+                // Nothing to process (startup, torn, failed start): let the
+                // in-flight transfer make progress before looping.
+                svcSleepThread(1e6);
+            }
+            else
+            {
+            // ---- 3) Process the ready buffer, using ITS metadata only.
+            // The captured snapshot shadows the scheduler variables so the
+            // processing code below keeps its original shape.
+            int scr = cmeta[ready].scr;
+            u8 cap_strip = cmeta[ready].strip;
+            bool interlacedRowSwitch = cmeta[ready].phase != 0;
+            bool hwInterlaced = cmeta[ready].hwil != 0;
+            u32 strip_x = cmeta[ready].strip_x;
+            u32 format[2];
+            format[0] = cmeta[ready].fmt;
+            format[1] = cmeta[ready].fmt;
+            screenbuf = capbuf[ready];
 
             int imgsize = 0;
 
@@ -1422,11 +1498,17 @@ void newThreadMainFunction(void* __dummy_arg__)
                 svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf, capin.screencapture[scr].framebuf_widthbytesize * 400);
             }
 
+            bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240; // bytes per pixel (dumb)
+            scrw = 240; // sure
+            bits = 4 << bsiz; // bpp (dumb)
+
             // interlaced (hardware): the captured data is one field
             if(hwInterlaced)
             {
                 scrw = scrw / 2;
             }
+
+            bool dma_torn = false; // torn buffers never reach this point
 
             // Flurry extension: skip unchanged strips (PROTOCOL.md A.1).
             // screenbuf holds the strip just captured for screen `scr`,
@@ -1453,8 +1535,8 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // mismatch every pass = endless resends of static screens,
                 // seen as bottom fps ~5 in quarter-res benchmarks).
                 int phase = ((cfgblk[5] || cfgblk[11]) && interlacedRowSwitch) ? 1 : 0;
-                u32* stored = &strip_crc[phase][scr][offs[scr] & 0b111];
-                u8* age = &strip_age[phase][scr][offs[scr] & 0b111];
+                u32* stored = &strip_crc[phase][scr][cap_strip & 0b111];
+                u8* age = &strip_age[phase][scr][cap_strip & 0b111];
 
                 if(*stored == c && (cfgblk[7] == 0 || *age < cfgblk[7]))
                 {
@@ -1530,13 +1612,10 @@ void newThreadMainFunction(void* __dummy_arg__)
             //printf("screen size in bytes = %i\n", bsiz);
             //printf("interlace_px_offset = %i\n", interlace_px_offset);
 
-            // increment screen fraction / part on o3DS
+            // legacy chunk index on o3DS (strip advance now lives in the
+            // capture scheduler)
             if(isold){
-                u8 b = 0b00001000 + (offs[scr]);
-                soc->setPakSubtypeB(b);
-                offs[scr]++;
-                if(offs[scr] >= limit[scr])
-                    offs[scr] = 0;
+                soc->setPakSubtypeB(0b00001000 + cap_strip);
             }
 
             // Protocol v2 (SFRAME): rewrap the encoded JPEG strip as a
@@ -1600,25 +1679,8 @@ void newThreadMainFunction(void* __dummy_arg__)
 #endif
             }
 
-            // Advance — AFTER the send, so every label matched the captured
-            // content. Sample phase first, then the screen.
-            if(frameInterlaced || softDownscaled)
-                interlacedRowSwitch = !interlacedRowSwitch;
             enc_rows_override = 0;
-
-            // Hold the screen while its second field is pending (post-toggle
-            // phase true = field B next) — only when this frame really was
-            // interlaced, otherwise holding deadlocks on screens that can't
-            // decimate (e.g. 24bpp framebuffers).
-            if(!(frameInterlaced && interlacedRowSwitch))
-            {
-                if(cfgblk[3] == 1) // Top Screen Only
-                    scr = 0;
-                else if(cfgblk[3] == 2) // Bottom Screen Only
-                    scr = 1;
-                else if(cfgblk[3] == 3) // Both Screens
-                    scr = !scr;
-            }
+            } // end of ready-buffer processing
 
             // 1 Hz perf stats to the client (0xFF/0x03). Sums are ms spent
             // in each stage during the last wall second (i.e. utilization);
@@ -1671,12 +1733,16 @@ void newThreadMainFunction(void* __dummy_arg__)
             {
                 chunks_realloc_needed = 0;
                 tryStopDma(&dmahand);
-                free(screenbuf);
+                cap_pending = -1;
+                cmeta[0].valid = 0;
+                cmeta[1].valid = 0;
+                if(capbuf[0]) { free(capbuf[0]); capbuf[0] = nullptr; }
+                if(capbuf[1]) { free(capbuf[1]); capbuf[1] = nullptr; }
                 screenbuf = nullptr;
                 if(allocateScreenbufMem(&screenbuf) < 0)
                 {
-                    // Not enough contiguous heap for the bigger strips:
-                    // fall back to the default 8 chunks.
+                    // Not enough heap for the bigger strips: fall back to
+                    // the default 8 chunks.
                     cfgblk[9] = 0;
                     allocateScreenbufMem(&screenbuf);
                 }
