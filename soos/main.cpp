@@ -1379,7 +1379,18 @@ void newThreadMainFunction(void* __dummy_arg__)
                 int dmaState = -1;
                 for(int i = 0; i < 100; i++)
                 {
-                    svcGetDmaState(&dmaState, dmahand);
+                    if(svcGetDmaState(&dmaState, dmahand) < 0)
+                    {
+                        // Old-3DS kernels can fail this query outright for
+                        // inter-process DMA handles (the legacy code
+                        // ignored the result, read its stale 0 and raced
+                        // the transfer). Trust the copy after a fixed
+                        // settle instead: a strip completes in well under
+                        // a millisecond.
+                        svcSleepThread(1e6);
+                        dmaState = 4;
+                        break;
+                    }
                     // 4 = DMASTATE_DONE. 0 also reads as done, but only
                     // trust it after one poll interval: a just-started
                     // transfer can report 0 before dispatch, and stopping
