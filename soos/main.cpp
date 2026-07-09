@@ -439,6 +439,8 @@ static bool isDmaSetForInterlaced = false;
 static bool import_fail_reported = false;
 // Same, for svcStartInterProcessDma failures in the capture loop.
 static bool dmafail_reported = false;
+// Protocol v2: SFRAME sequence number, increments per sent pass.
+static u16 v2_seq = 0;
 
 // Flurry extension state (PROTOCOL.md A.1).
 // crc32 of the last-sent content per [interlace phase][screen][strip],
@@ -720,6 +722,10 @@ int netfuncWaitForSettings()
 
                 case 0x0C: // Flurry extension: 1 Hz perf stats on/off (bool)
                     cfgblk[12] = j?1:0;
+                    return 1;
+
+                case 0x0F: // Flurry extension: protocol v2 (SFRAME) framing
+                    cfgblk[15] = j?1:0;
                     return 1;
 
                 default:
@@ -1317,6 +1323,9 @@ void newThreadMainFunction(void* __dummy_arg__)
             // overlap it bought was worth ~0.3 ms/s (measured). ----
 
             u32 region_siz = capin.screencapture[scr].framebuf_widthbytesize * stride[scr];
+            // Screen-space x of this strip (1 fb row = 1 screen column),
+            // recorded before offs advances — used by the v2 region header.
+            u32 strip_x = offs[scr] * stride[scr];
             bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240; // bytes per pixel (dumb)
             scrw = 240; // sure
             bits = 4 << bsiz; // bpp (dumb)
@@ -1517,6 +1526,49 @@ void newThreadMainFunction(void* __dummy_arg__)
                 offs[scr]++;
                 if(offs[scr] >= limit[scr])
                     offs[scr] = 0;
+            }
+
+            // Protocol v2 (SFRAME): rewrap the encoded JPEG strip as a
+            // one-region pass. The u32 length field shares the legacy
+            // offset (bytes 4..8), so wribuf() sends it unchanged; the
+            // data moves from the legacy payload offset (+8) to after the
+            // pass + region headers (+26). TGA stays on legacy framing.
+            if(cfgblk[15] && !skipsend && cfgblk[4] == 0 && soc->getPakSize())
+            {
+                u32 dlen = soc->getPakSize();
+                u8* b = soc->bufferptr;
+                memmove(b + 8 + 4 + 14, b + 8, dlen);
+                b[0] = 0x90; // SFRAME
+                b[1] = (u8)scr;
+                b[2] = (u8)(v2_seq & 0xFF);
+                b[3] = (u8)(v2_seq >> 8);
+                v2_seq++;
+                soc->setPakSize(4 + 14 + dlen);
+                b[8] = 0;  // pass_flags
+                b[9] = 1;  // region_count
+                b[10] = 0;
+                b[11] = 0;
+                u8* r = b + 12;
+                u16 rx = (u16)strip_x;
+                u16 rw = (u16)stride[scr];
+                r[0] = rx & 0xFF; r[1] = rx >> 8;
+                r[2] = 0; r[3] = 0;          // y = 0
+                r[4] = rw & 0xFF; r[5] = rw >> 8;
+                r[6] = 240; r[7] = 0;        // h = 240
+                r[8] = 1;                    // codec: JPEG
+                r[9] = 0;
+                if(frameInterlaced)
+                {
+                    r[9] |= 0b00000010;      // INTERLACED
+                    if(interlacedRowSwitch)
+                        r[9] |= 0b00000001;  // FIELD_B (pre-toggle phase)
+                }
+                if(softDownscaled)
+                    r[9] |= 0b00000100;      // DOWNSCALED (client paints 2x2)
+                r[10] = dlen & 0xFF;
+                r[11] = (dlen >> 8) & 0xFF;
+                r[12] = (dlen >> 16) & 0xFF;
+                r[13] = (dlen >> 24) & 0xFF;
             }
 
             // If size is 0, don't send the packet.
@@ -1957,7 +2009,7 @@ int main()
                     soc->setPakSubtype(0x04);
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
-                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b01111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale | stats-toggle
+                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b11111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale | stats-toggle | protocol-v2
                     soc->setPakSize(2);
                     soc->wribuf();
 
