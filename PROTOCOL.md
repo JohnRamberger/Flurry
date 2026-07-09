@@ -293,6 +293,69 @@ skipped strip simply stays stale until it changes or the refresh interval
 forces it). The refresh interval bounds how long a lost/corrupt strip can
 stay wrong.
 
+## Appendix B2: Protocol v2 — region streaming (implementation target)
+
+Successor to both the v1 strawman above and the legacy protocol. Design is
+anchored in measured Old-3DS costs: socket send ≈ 3 ms **per packet**
+(size-almost-independent soc IPC), JPEG encode ≈ 10 µs/pixel regardless of
+quality, DMA ≈ free, crc32 ≈ 0.03 µs/byte. Conclusions: batch regions into
+few packets, skip pixels before encoding them, and never JPEG a small
+change.
+
+### Activation
+
+Legacy-compatible bootstrap: the sysmodule announces v2 capability
+(legacy announce feature bit 7); the client sends legacy setting `0x0F`
+(`v2 enable`, bool) and the connection switches to v2 framing from the
+next capture pass. Legacy packets 0x01–0xFF remain valid until then.
+
+### Capture & dirty detection (3DS side)
+
+- Capture stays strip-wise contiguous DMA (kernel-safe), synchronous:
+  DMA → wait → process → send, one strip at a time.
+- Each captured strip is crc'd as a grid of **cells** (contiguous fb-row
+  groups × y-segments, e.g. 8 px screen-columns × 60 px rows). Changed
+  cells per strip are coalesced to a bounding rect (refinement: multiple
+  rects) in screen coordinates.
+- Codec per rect: `area × bpp ≤ RAW_THRESHOLD` (≈ 12 KB) → **raw RGB565**
+  (zero encode; PC converts); larger → **JPEG** of the sub-rect
+  (fb-row-contiguous slice + pitch for partial heights).
+- Decimation (interlace field / quarter-res) applies before encode as
+  today and is flagged per region.
+
+### Frames (3DS → PC)
+
+One `SFRAME` per capture pass per screen — all changed regions batched
+into a single send:
+
+```
+[0x90][screen u8][seq u16][payload_len u32]
+  [pass_flags u8][region_count u8][reserved u16]
+  region: [x u16][y u16][w u16][h u16][codec u8][flags u8][len u16][data…]
+```
+
+- Coordinates are **screen space** (x 0–399/319 left→right, y 0–239
+  top-down); the 3DS does the framebuffer-rotation math once.
+- `codec`: 0 = raw RGB565 LE, 1 = JPEG, 2 = raw RGB565 2×-downscaled
+  (client paints 2×2). `flags` bit 0 = interlace field B (client weaves
+  or line-doubles).
+- `seq` increments per pass; receiver reports (future, for UDP/rate
+  control) reference it.
+- `region_count` 0 is legal (heartbeat when everything was skipped).
+
+### Control (PC → 3DS)
+
+Single CONFIG2 struct (idempotent full state, extensible by length),
+START/STOP/PING as in v1. Knob set = the current extension settings
+(quality, screens, decimation, chunks, sleep, skip/refresh, fps cap,
+stats) collapsed into one message.
+
+### Transport
+
+TCP :6464 first. The frame format is transport-agnostic; UDP (one
+datagram per SFRAME ≤ MTU, fragmented otherwise) slots in behind the
+same format once the sendto-vs-send IPC benchmark justifies it.
+
 ## Appendix B: v2 transport direction (design notes, non-normative)
 
 Decided direction for the protocol rewrite, pending one hardware
