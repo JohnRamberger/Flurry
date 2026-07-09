@@ -7,7 +7,7 @@
     "file": "flurry.unistore",
     "sheet": "flurry.t3x",
     "sheetURL": "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/assets/store/flurry.t3x",
-    "revision": 1783586476,
+    "revision": 1783587364,
     "version": 3
   },
   "storeContent": [
@@ -96,7 +96,7 @@
           "3DS"
         ],
         "icon_index": 1,
-        "version": "v0.1.1.45"
+        "version": "v0.1.1.46"
       },
       "Install Flurry + Loader": [
         {
