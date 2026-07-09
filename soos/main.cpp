@@ -1100,6 +1100,13 @@ void newThreadMainFunction(void* __dummy_arg__)
     double timems_writetosocbuf = 0;
     double timems_formatconvert = 0;
 
+    // Per-second perf accounting, reported to the client as a 1 Hz stats
+    // packet (0xFF/0x03). Tick sums per stage = ms spent per wall second.
+    u64 st_dma = 0, st_crc = 0, st_enc = 0, st_send = 0;
+    u32 st_sent = 0, st_skip = 0;
+    u64 st_epoch_ms = osGetTime();
+    u64 st_t0 = 0;
+
     u32 siz = 0x80;
     u32 bsiz = 1;
     u32 scrw = 2;
@@ -1237,6 +1244,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             }
 
             int dmaState = 0;
+            st_t0 = svcGetSystemTick();
             for(int i = 0; i < 60; i++) // Should cover all cases.
             {
                 svcGetDmaState(&dmaState, dmahand);
@@ -1244,6 +1252,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                     break;
                 svcSleepThread(5e4); // Going higher (5e6, for example) may result in crashes.
             }
+            st_dma += svcGetSystemTick() - st_t0;
 
             tryStopDma(&dmahand);
 
@@ -1280,7 +1289,9 @@ void newThreadMainFunction(void* __dummy_arg__)
                 if(crclen > crccap)
                     crclen = crccap;
 
+                st_t0 = svcGetSystemTick();
                 u32 c = crc32(0L, (const Bytef*)screenbuf, crclen);
+                st_crc += svcGetSystemTick() - st_t0;
                 int phase = (isStoredFrameInterlaced && interlacedRowSwitch) ? 1 : 0;
                 u32* stored = &strip_crc[phase][scr][offs[scr] & 0b111];
                 u8* age = &strip_age[phase][scr][offs[scr] & 0b111];
@@ -1303,8 +1314,11 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // Suppress the send below; the pipeline (strip increment,
                 // screen switch, next DMA) still advances.
                 soc->setPakSize(0);
+                st_skip++;
             }
             else
+            {
+            st_t0 = svcGetSystemTick();
             switch(cfgblk[4])
             {
             case 0:
@@ -1315,6 +1329,8 @@ void newThreadMainFunction(void* __dummy_arg__)
                 break;
             default:
                 break; // This case shouldn't occur.
+            }
+            st_enc += svcGetSystemTick() - st_t0;
             }
 
             //printf("height (scrw) = %i\n", scrw);
@@ -1409,12 +1425,44 @@ void newThreadMainFunction(void* __dummy_arg__)
                 osTickCounterUpdate(&tick_ctr_1);
 #endif
 
+                st_t0 = svcGetSystemTick();
                 soc->wribuf();
+                st_send += svcGetSystemTick() - st_t0;
+                st_sent++;
 
 #if DEBUG_VERBOSE==1
                 osTickCounterUpdate(&tick_ctr_1);
                 timems_writetosocbuf = osTickCounterRead(&tick_ctr_1);
 #endif
+            }
+
+            // 1 Hz perf stats to the client (0xFF/0x03). Sums are ms spent
+            // in each stage during the last wall second (i.e. utilization);
+            // the frame packet above was already sent, so the socket buffer
+            // is free to reuse.
+            {
+                u64 st_now = osGetTime();
+                if(st_now - st_epoch_ms >= 1000)
+                {
+                    const double tick2ms = 1000.0 / SYSCLOCK_ARM11;
+                    int stlen = sprintf((char*)(soc->bufferptr + bufsoc_pak_data_offset),
+                        "sent=%lu skip=%lu\ndma=%.1f crc=%.1f enc=%.1f send=%.1f (ms/s)\nq=%u chunks=%lu",
+                        (unsigned long)st_sent, (unsigned long)st_skip,
+                        st_dma * tick2ms, st_crc * tick2ms,
+                        st_enc * tick2ms, st_send * tick2ms,
+                        (unsigned int)cfgblk[1], (unsigned long)limit[scr]);
+                    if(stlen > 0)
+                    {
+                        soc->setPakType(0xFF);
+                        soc->setPakSubtype(0x03); // legacy STATS subtype
+                        soc->setPakSubtypeB(0);
+                        soc->setPakSize(stlen);
+                        soc->wribuf();
+                    }
+                    st_dma = st_crc = st_enc = st_send = 0;
+                    st_sent = st_skip = 0;
+                    st_epoch_ms = st_now;
+                }
             }
 
             // Frame pacing. With an fps cap (Flurry extension, cfgblk[8]),
