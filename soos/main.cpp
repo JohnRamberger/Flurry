@@ -404,6 +404,30 @@ static u32 limit[2] = {1, 1};
 static u32 stride[2] = {80, 80};
 static u32 format[2] = {0xF00FCACE, 0xF00FCACE};
 
+// Config Block. Indices are named so a typo can't silently drive the wrong
+// knob. Wire setting subtypes map here (see PROTOCOL.md A.1 / B2):
+//   0x01→QUALITY 0x03→SCREEN 0x04→FORMAT 0x05→INTERLACE 0x06→SKIP
+//   0x07→REFRESH 0x08→FPSCAP 0x09→CHUNKS 0x0A→SLEEP 0x0B→DOWNSCALE
+//   0x0C→STATS 0x0F→V2 0x10→GRID_COLS 0x11→GRID_ROWS
+enum {
+    CFG_CONNECTED    = 0,  // 0 = waiting, 1 = streaming
+    CFG_QUALITY      = 1,  // JPEG quality 1-100
+    CFG_CPUCAP       = 2,  // dummied out
+    CFG_SCREEN       = 3,  // 1 top, 2 bottom, 3 both
+    CFG_FORMAT       = 4,  // 0 JPEG, 1 TGA
+    CFG_INTERLACE    = 5,
+    CFG_SKIP         = 6,  // skip unchanged strips/cells
+    CFG_REFRESH      = 7,  // force-send every N frames (0 = never)
+    CFG_FPSCAP       = 8,  // 0 = uncapped
+    CFG_CHUNKS       = 9,  // strips per screen (Old 3DS: 2/4/8)
+    CFG_SLEEP        = 10, // ms between strips (Old 3DS pacing floor)
+    CFG_DOWNSCALE    = 11, // quarter-res
+    CFG_STATS        = 12, // 1 Hz perf stats on/off
+    CFG_V2           = 15, // protocol v2 (SFRAME) framing
+    CFG_GRID_COLS    = 16, // dirty-grid columns per screen
+    CFG_GRID_ROWS    = 17, // dirty-grid rows per screen
+};
+
 // Config Block
 static u8 cfgblk[0x100];
 
@@ -497,9 +521,9 @@ static capmeta cmeta[2];
 // plus a frames-since-last-sent age per strip for the refresh interval.
 static u32 strip_crc[2][2][8];
 static u8 strip_age[2][2][8];
-// osGetTime() of the previous paced iteration (fps cap, cfgblk[8]).
+// osGetTime() of the previous paced iteration (fps cap, cfgblk[CFG_FPSCAP]).
 static u64 pace_last = 0;
-// Set when the chunk count (cfgblk[9]) or format changes and screenbuf must
+// Set when the chunk count (cfgblk[CFG_CHUNKS]) or format changes and screenbuf must
 // be reallocated at the next safe point in the capture loop.
 static vu8 chunks_realloc_needed = 0;
 // Nonzero while encoding a quarter-res (software downscaled) strip: the row
@@ -668,11 +692,11 @@ int netfuncWaitForSettings()
             switch(soc->getPakType())
             {
             case 0x02: // Init (New ChirunoMod Packet Specification)
-                cfgblk[0] = 1;
+                cfgblk[CFG_CONNECTED] = 1;
                 return 1;
 
             case 0x03: // Disconnect (new packet spec)
-                cfgblk[0] = 0;
+                cfgblk[CFG_CONNECTED] = 0;
                 debugPrint(1, "Received packet type $03, forcibly disconnecting...");
                 return -1;
 
@@ -683,17 +707,17 @@ int netfuncWaitForSettings()
                 case 0x01: // JPEG Quality (1-100%)
                     // Error-Checking
                     if(j > 100)
-                        cfgblk[1] = 100;
+                        cfgblk[CFG_QUALITY] = 100;
                     else if(j < 1)
-                        cfgblk[1] = 1;
+                        cfgblk[CFG_QUALITY] = 1;
                     else
-                        cfgblk[1] = j;
+                        cfgblk[CFG_QUALITY] = j;
                     return 1;
 
                 case 0x02: // CPU Cap value / CPU Limit / App Resource Limit
 
                     // Redundancy check
-                    if(j == cfgblk[2])
+                    if(j == cfgblk[CFG_CPUCAP])
                         return 1;
 
                     // Maybe this is percentage of CPU time? (https://www.3dbrew.org/wiki/APT:SetApplicationCpuTimeLimit)
@@ -714,13 +738,13 @@ int netfuncWaitForSettings()
                     // Functionality dummied out for now.
                     //setCpuResourceLimit((u32)j);
 
-                    cfgblk[2] = j;
+                    cfgblk[CFG_CPUCAP] = j;
 
                     return 1;
 
                 case 0x03: // Which Screen
                     if(j != 0 && j < 4)
-                        cfgblk[3] = j;
+                        cfgblk[CFG_SCREEN] = j;
                     return 1;
 
                 case 0x04: // Image Format (JPEG or TGA?)
@@ -728,9 +752,9 @@ int netfuncWaitForSettings()
                     {
                         // Chunk sizing depends on the format (TGA forces 8);
                         // reallocate if a custom chunk count is in play.
-                        if(isold && j != cfgblk[4] && cfgblk[9])
+                        if(isold && j != cfgblk[CFG_FORMAT] && cfgblk[CFG_CHUNKS])
                             chunks_realloc_needed = 1;
-                        cfgblk[4] = j;
+                        cfgblk[CFG_FORMAT] = j;
                     }
                     return 1;
 
@@ -739,58 +763,58 @@ int netfuncWaitForSettings()
                     // was paired with full-frame capture (144 KB buffer).
                     // Combined with chunked capture the strip buffer already
                     // fits, so it's allowed everywhere now.
-                    cfgblk[5] = j?1:0;
+                    cfgblk[CFG_INTERLACE] = j?1:0;
                     return 1;
 
                 case 0x06: // Flurry extension: skip unchanged strips (crc32)
-                    cfgblk[6] = j?1:0;
+                    cfgblk[CFG_SKIP] = j?1:0;
                     return 1;
 
                 case 0x07: // Flurry extension: strip refresh interval (frames; 0 = never force)
-                    cfgblk[7] = j;
+                    cfgblk[CFG_REFRESH] = j;
                     return 1;
 
                 case 0x08: // Flurry extension: fps cap (0 = uncapped)
-                    cfgblk[8] = (j > 60) ? 60 : j;
+                    cfgblk[CFG_FPSCAP] = (j > 60) ? 60 : j;
                     return 1;
 
                 case 0x09: // Flurry extension: chunk count (Old 3DS): 2, 4 or 8
-                    if((j == 2 || j == 4 || j == 8) && isold && cfgblk[9] != j)
+                    if((j == 2 || j == 4 || j == 8) && isold && cfgblk[CFG_CHUNKS] != j)
                     {
-                        cfgblk[9] = j;
+                        cfgblk[CFG_CHUNKS] = j;
                         chunks_realloc_needed = 1;
                     }
                     return 1;
 
                 case 0x0A: // Flurry extension: per-strip sleep ms (Old 3DS pacing floor)
-                    cfgblk[10] = (j > 20) ? 20 : j;
+                    cfgblk[CFG_SLEEP] = (j > 20) ? 20 : j;
                     return 1;
 
                 case 0x0B: // Flurry extension: quarter-res downscale (Old 3DS, bool)
-                    cfgblk[11] = j?1:0;
+                    cfgblk[CFG_DOWNSCALE] = j?1:0;
                     return 1;
 
                 case 0x0C: // Flurry extension: 1 Hz perf stats on/off (bool)
-                    cfgblk[12] = j?1:0;
+                    cfgblk[CFG_STATS] = j?1:0;
                     return 1;
 
                 case 0x0F: // Flurry extension: protocol v2 (SFRAME) framing
-                    cfgblk[15] = j?1:0;
+                    cfgblk[CFG_V2] = j?1:0;
                     return 1;
 
                 case 0x10: // Flurry extension: dirty-grid columns per screen (4/8/16)
-                    if((j == 4 || j == 8 || j == 16) && cfgblk[16] != j)
+                    if((j == 4 || j == 8 || j == 16) && cfgblk[CFG_GRID_COLS] != j)
                     {
-                        cfgblk[16] = j;
+                        cfgblk[CFG_GRID_COLS] = j;
                         // Geometry changed: all stored cell crcs are stale.
                         memset(cell_crc, 0, sizeof(cell_crc));
                     }
                     return 1;
 
                 case 0x11: // Flurry extension: dirty-grid rows per screen (1/2/4/8)
-                    if((j == 1 || j == 2 || j == 4 || j == 8) && cfgblk[17] != j)
+                    if((j == 1 || j == 2 || j == 4 || j == 8) && cfgblk[CFG_GRID_ROWS] != j)
                     {
-                        cfgblk[17] = j;
+                        cfgblk[CFG_GRID_ROWS] = j;
                         memset(cell_crc, 0, sizeof(cell_crc));
                     }
                     return 1;
@@ -843,7 +867,7 @@ int allocateScreenbufMem(u32** myscreenbuf)
     {
         /* interlacing is disabled on o3DS
         // If Interlaced
-        if(cfgblk[5] == 1)
+        if(cfgblk[CFG_INTERLACE] == 1)
         {
             limit[0] = 1;
             limit[1] = 1;
@@ -854,14 +878,14 @@ int allocateScreenbufMem(u32** myscreenbuf)
         else
         {
         */
-        // Chunk count (Flurry extension, setting 0x09 -> cfgblk[9]):
+        // Chunk count (Flurry extension, setting 0x09 -> cfgblk[CFG_CHUNKS]):
         // fewer, larger strips cut per-strip encode setup and socket IPC.
         // 2 is the floor: full frames would need a bigger socket buffer.
         // TGA is RLE with a large worst case, so it keeps the 8-chunk bound.
-        u32 c = cfgblk[9];
+        u32 c = cfgblk[CFG_CHUNKS];
         if(c != 2 && c != 4)
             c = 8;
-        if(cfgblk[4] == 1)
+        if(cfgblk[CFG_FORMAT] == 1)
             c = 8;
         limit[0] = c; // Capture the screen in c chunks
         limit[1] = c;
@@ -1035,7 +1059,7 @@ void makeJpegImage(double* timems_fc, double* timems_pf, int scr, u32* scrw, u32
 
     u8* destaddr = soc->bufferptr + bufsoc_pak_data_offset;
 
-    if(!tjCompress2(jencode, (u8*)screenbuf, *scrw, (*bsiz) * (*scrw), enc_rows, tjpixelformat, &destaddr, (u32*)imgsize, TJSAMP_420, cfgblk[1], TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
+    if(!tjCompress2(jencode, (u8*)screenbuf, *scrw, (*bsiz) * (*scrw), enc_rows, tjpixelformat, &destaddr, (u32*)imgsize, TJSAMP_420, cfgblk[CFG_QUALITY], TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
     {
 #if DEBUG_VERBOSE==1
         osTickCounterUpdate(&tick_ctr_1);
@@ -1269,7 +1293,7 @@ void newThreadMainFunction(void* __dummy_arg__)
 
     PatStay(0x00FF00); // Notif LED = Green
 
-    while(cfgblk[0] == 0)
+    while(cfgblk[CFG_CONNECTED] == 0)
     {
         if(soc->avail())
         {
@@ -1307,13 +1331,13 @@ void newThreadMainFunction(void* __dummy_arg__)
     // data-aborts on gather-stride DMA configs (kernel crash, FAR=0x20).
     // Old 3DS interlaces in software instead (see the decimation pass in
     // the capture loop). 24bpp frames are excluded either way.
-    if(cfgblk[5] && !isold && (format[scr] != 1))
+    if(cfgblk[CFG_INTERLACE] && !isold && (format[scr] != 1))
         isDmaSetForInterlaced = true;
     else
         isDmaSetForInterlaced = false;
 
-    updateDmaCfgBpp(dma_config[0], getFormatBpp(format[0]), cfgblk[5], capin.screencapture[0].framebuf_widthbytesize);
-    updateDmaCfgBpp(dma_config[1], getFormatBpp(format[1]), cfgblk[5], capin.screencapture[1].framebuf_widthbytesize);
+    updateDmaCfgBpp(dma_config[0], getFormatBpp(format[0]), cfgblk[CFG_INTERLACE], capin.screencapture[0].framebuf_widthbytesize);
+    updateDmaCfgBpp(dma_config[1], getFormatBpp(format[1]), cfgblk[CFG_INTERLACE], capin.screencapture[1].framebuf_widthbytesize);
 
     // Housekeeping (settings poll, GSP capture-info import, DMA cfg) is
     // throttled: each is a service IPC and doing them per strip was a large
@@ -1387,12 +1411,12 @@ void newThreadMainFunction(void* __dummy_arg__)
 
             // Hardware (DMA) interlacing: New 3DS only (o3DS kernel aborts
             // on the required gather-stride config; software path below).
-            if(cfgblk[5] && !isold && (getFormatBpp(format[scr]) != 24))
+            if(cfgblk[CFG_INTERLACE] && !isold && (getFormatBpp(format[scr]) != 24))
                 isDmaSetForInterlaced = true;
             else
                 isDmaSetForInterlaced = false;
 
-            switch(cfgblk[3])
+            switch(cfgblk[CFG_SCREEN])
             {
             case 1:
                 updateDmaCfgBpp(dma_config[0], getFormatBpp(format[0]), isDmaSetForInterlaced?1:0, capin.screencapture[0].framebuf_widthbytesize);
@@ -1595,7 +1619,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // SAME strip right after field A; everything else moves to
                 // the next strip / screen.
                 bool willDecimate = m->hwil
-                    || (isold && (cfgblk[5] || cfgblk[11]) && getFormatBpp(format[scr]) == 16);
+                    || (isold && (cfgblk[CFG_INTERLACE] || cfgblk[CFG_DOWNSCALE]) && getFormatBpp(format[scr]) == 16);
                 if(willDecimate && m->phase == 0)
                 {
                     interlacedRowSwitch = true; // field B of this strip next
@@ -1609,11 +1633,11 @@ void newThreadMainFunction(void* __dummy_arg__)
                         offs[scr] = 0;
                         sweep_pending[scr] = 1; // a new sweep begins
                     }
-                    if(cfgblk[3] == 1) // Top Screen Only
+                    if(cfgblk[CFG_SCREEN] == 1) // Top Screen Only
                         scr = 0;
-                    else if(cfgblk[3] == 2) // Bottom Screen Only
+                    else if(cfgblk[CFG_SCREEN] == 2) // Bottom Screen Only
                         scr = 1;
-                    else if(cfgblk[3] == 3) // Both Screens
+                    else if(cfgblk[CFG_SCREEN] == 3) // Both Screens
                         scr = !scr;
                 }
             }
@@ -1673,11 +1697,11 @@ void newThreadMainFunction(void* __dummy_arg__)
             // Replaces the strip-level crc below when active. Runs on the
             // pre-decimation capture, so static content skips regardless of
             // the interlace/quarter sample phase. Grid geometry is client
-            // set per SCREEN: cfgblk[16] columns (4/8/16), cfgblk[17] rows
+            // set per SCREEN: cfgblk[CFG_GRID_COLS] columns (4/8/16), cfgblk[CFG_GRID_ROWS] rows
             // (1/2/4/8; rows multiply crc call count, columns are free).
-            u32 gcols = cfgblk[16];
+            u32 gcols = cfgblk[CFG_GRID_COLS];
             if(gcols != 4 && gcols != 8 && gcols != 16) gcols = 16;
-            u32 grows = cfgblk[17];
+            u32 grows = cfgblk[CFG_GRID_ROWS];
             if(grows != 1 && grows != 2 && grows != 4 && grows != 8) grows = 1;
             u32 cw = ((scr == 0) ? 400 : 320) / gcols;
             u32 ch = 240 / grows;
@@ -1687,7 +1711,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             // the whole cell system there (full-column updates only).
             u32 capbpc = getFormatBpp(format[scr]);
             capbpc = (capbpc == 32) ? 3 : capbpc / 8;
-            bool v2cells = cfgblk[15] && cfgblk[6] && !dma_torn && !hwInterlaced
+            bool v2cells = cfgblk[CFG_V2] && cfgblk[CFG_SKIP] && !dma_torn && !hwInterlaced
                 && (capbpc == 2 || capbpc == 3)
                 && cw > 0 && (stride[scr] % cw == 0) && (stride[scr] / cw) <= 20;
             bool v2raw_built = false;
@@ -1746,7 +1770,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 u8* age = &strip_age[0][scr][cap_strip & 7];
                 if(maxr < 0)
                 {
-                    if(cfgblk[7] && *age >= cfgblk[7])
+                    if(cfgblk[CFG_REFRESH] && *age >= cfgblk[CFG_REFRESH])
                     {
                         minr = 0; maxr = (int)cellcols - 1;
                         mins = 0; maxs = (int)cellsegs - 1;
@@ -1812,7 +1836,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                         }
                         v2raw_built = true;
                     }
-                    else if(cfgblk[4] == 0)
+                    else if(cfgblk[CFG_FORMAT] == 0)
                     {
                         // Large dirty area: JPEG of the dirty RECT (via
                         // pitch), not the whole strip — exact update bounds
@@ -1834,7 +1858,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                             + (((u32)minr * cw) * 240 + (u32)mins * ch) * ebpc;
                         if(!tjCompress2(jencode, (u8*)srcp, (int)h_px, (int)(240 * ebpc),
                                         (int)w_cols, TJPF_RGB, &dest, &jsz,
-                                        TJSAMP_420, cfgblk[1],
+                                        TJSAMP_420, cfgblk[CFG_QUALITY],
                                         TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
                         {
                             b[0] = 0x90; // SFRAME
@@ -1874,7 +1898,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 }
             }
 
-            if(!v2cells && !dma_torn && cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
+            if(!v2cells && !dma_torn && cfgblk[CFG_SKIP] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
             {
                 u32 crclen = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
                 if(hwInterlaced)
@@ -1892,11 +1916,11 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // static strip; sharing one slot made them fight (crc A vs B
                 // mismatch every pass = endless resends of static screens,
                 // seen as bottom fps ~5 in quarter-res benchmarks).
-                int phase = ((cfgblk[5] || cfgblk[11]) && interlacedRowSwitch) ? 1 : 0;
+                int phase = ((cfgblk[CFG_INTERLACE] || cfgblk[CFG_DOWNSCALE]) && interlacedRowSwitch) ? 1 : 0;
                 u32* stored = &strip_crc[phase][scr][cap_strip & 0b111];
                 u8* age = &strip_age[phase][scr][cap_strip & 0b111];
 
-                if(*stored == c && (cfgblk[7] == 0 || *age < cfgblk[7]))
+                if(*stored == c && (cfgblk[CFG_REFRESH] == 0 || *age < cfgblk[CFG_REFRESH]))
                 {
                     if(*age < 0xFF)
                         (*age)++;
@@ -1916,12 +1940,12 @@ void newThreadMainFunction(void* __dummy_arg__)
             // both axes (~a quarter). Quarter-res wins when both are set.
             bool softInterlaced = false;
             bool softDownscaled = false;
-            if((cfgblk[5] || cfgblk[11]) && isold && !skipsend && !v2raw_built
+            if((cfgblk[CFG_INTERLACE] || cfgblk[CFG_DOWNSCALE]) && isold && !skipsend && !v2raw_built
                && getFormatBpp(format[scr]) == 16)
             {
                 u16* px16 = (u16*)screenbuf;
                 u32 ph = interlacedRowSwitch ? 1 : 0;
-                if(cfgblk[11]) // quarter-res: every other pixel of every other row
+                if(cfgblk[CFG_DOWNSCALE]) // quarter-res: every other pixel of every other row
                 {
                     u32 rows = stride[scr] / 2;
                     for(u32 r = 0; r < rows; r++)
@@ -1963,7 +1987,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             else
             {
             st_t0 = svcGetSystemTick();
-            switch(cfgblk[4])
+            switch(cfgblk[CFG_FORMAT])
             {
             case 0:
                 makeJpegImage(&timems_formatconvert, &timems_processframe, scr, &scrw, &bsiz, &imgsize, format, frameInterlaced, interlacedRowSwitch);
@@ -1993,7 +2017,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             // offset (bytes 4..8), so wribuf() sends it unchanged; the
             // data moves from the legacy payload offset (+8) to after the
             // pass + region headers (+26). TGA stays on legacy framing.
-            if(cfgblk[15] && !skipsend && !v2raw_built && cfgblk[4] == 0 && soc->getPakSize())
+            if(cfgblk[CFG_V2] && !skipsend && !v2raw_built && cfgblk[CFG_FORMAT] == 0 && soc->getPakSize())
             {
                 u32 dlen = soc->getPakSize();
                 u8* b = soc->bufferptr;
@@ -2058,7 +2082,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             // is free to reuse.
             {
                 u64 st_now = osGetTime();
-                if(cfgblk[12] && st_now - st_epoch_ms >= 1000)
+                if(cfgblk[CFG_STATS] && st_now - st_epoch_ms >= 1000)
                 {
                     // ARM11 system tick frequency (SYSCLOCK_ARM11 in modern
                     // libctru; not defined in the legacy 1.2.1 headers).
@@ -2068,8 +2092,8 @@ void newThreadMainFunction(void* __dummy_arg__)
                         (unsigned long)st_sent, (unsigned long)st_skip, (unsigned long)st_torn,
                         st_dma * tick2ms, st_crc * tick2ms,
                         st_enc * tick2ms, st_send * tick2ms,
-                        (unsigned int)cfgblk[1], (unsigned long)limit[scr],
-                        cfgblk[11] ? 'd' : (cfgblk[5] ? 'i' : 'p'));
+                        (unsigned int)cfgblk[CFG_QUALITY], (unsigned long)limit[scr],
+                        cfgblk[CFG_DOWNSCALE] ? 'd' : (cfgblk[CFG_INTERLACE] ? 'i' : 'p'));
                     if(stlen > 0)
                     {
                         soc->setPakType(0xFF);
@@ -2082,7 +2106,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                     st_sent = st_skip = st_torn = 0;
                     st_epoch_ms = st_now;
                 }
-                else if(!cfgblk[12])
+                else if(!cfgblk[CFG_STATS])
                 {
                     // Stats disabled: keep the window fresh so counters
                     // don't accumulate stale history until re-enabled.
@@ -2113,7 +2137,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 {
                     // Not enough heap for the bigger strips: fall back to
                     // the default 8 chunks.
-                    cfgblk[9] = 0;
+                    cfgblk[CFG_CHUNKS] = 0;
                     allocateScreenbufMem(&screenbuf);
                 }
                 offs[0] = 0;
@@ -2129,13 +2153,13 @@ void newThreadMainFunction(void* __dummy_arg__)
                     soc->errformat((char*)"chunks: now %u per screen", (unsigned int)limit[0]);
             }
 
-            // Frame pacing. With an fps cap (Flurry extension, cfgblk[8]),
+            // Frame pacing. With an fps cap (Flurry extension, cfgblk[CFG_FPSCAP]),
             // pace iterations so full frames hit the target rate; otherwise
             // keep the legacy fixed Old-3DS sleep.
-            if(cfgblk[8])
+            if(cfgblk[CFG_FPSCAP])
             {
-                u32 iters_per_frame = limit[scr] * ((cfgblk[3] == 3) ? 2 : 1);
-                u64 gap_ms = 1000 / ((u32)cfgblk[8] * iters_per_frame);
+                u32 iters_per_frame = limit[scr] * ((cfgblk[CFG_SCREEN] == 3) ? 2 : 1);
+                u64 gap_ms = 1000 / ((u32)cfgblk[CFG_FPSCAP] * iters_per_frame);
                 u64 now = osGetTime();
                 if(pace_last && now >= pace_last && (now - pace_last) < gap_ms)
                     svcSleepThread((gap_ms - (now - pace_last)) * 1000000ULL);
@@ -2143,11 +2167,11 @@ void newThreadMainFunction(void* __dummy_arg__)
             }
             else if(isold){
                 // Legacy fixed pause between strips, now tunable (Flurry
-                // extension setting 0x0A -> cfgblk[10], ms; 0 disables).
+                // extension setting 0x0A -> cfgblk[CFG_SLEEP], ms; 0 disables).
                 // Gives syscore services (nwm/WiFi) breathing room; lower
                 // at your own risk.
-                if(cfgblk[10])
-                    svcSleepThread((u64)cfgblk[10] * 1000000ULL);
+                if(cfgblk[CFG_SLEEP])
+                    svcSleepThread((u64)cfgblk[CFG_SLEEP] * 1000000ULL);
             }
         }
         else
@@ -2238,12 +2262,12 @@ int main()
     // cfgblk sane defaults. NOTE: must come after the memset above (they
     // used to be set before it and were silently wiped; clients that send
     // settings before Init masked that).
-    cfgblk[1] = 70; // JPEG quality
-    cfgblk[3] = 1;  // top screen
-    cfgblk[7] = 64; // strip-skip refresh interval (frames)
-    cfgblk[10] = 5; // per-strip sleep ms (legacy Old-3DS pacing floor)
-    cfgblk[16] = 16; // dirty-grid columns per screen
-    cfgblk[17] = 1;  // dirty-grid rows (1 = full-height columns: row cuts
+    cfgblk[CFG_QUALITY] = 70; // JPEG quality
+    cfgblk[CFG_SCREEN] = 1;  // top screen
+    cfgblk[CFG_REFRESH] = 64; // strip-skip refresh interval (frames)
+    cfgblk[CFG_SLEEP] = 5; // per-strip sleep ms (legacy Old-3DS pacing floor)
+    cfgblk[CFG_GRID_COLS] = 16; // dirty-grid columns per screen
+    cfgblk[CFG_GRID_ROWS] = 1;  // dirty-grid rows (1 = full-height columns: row cuts
                      // multiply crc calls, column cuts are free)
 
     u32 soc_service_buf_siz = 0;
@@ -2270,7 +2294,7 @@ int main()
 
         /* interlacing is disabled on o3DS
         // If Interlaced
-        if(cfgblk[5] == 1)
+        if(cfgblk[CFG_INTERLACE] == 1)
         {
             limit[0] = 1;
             limit[1] = 1;
