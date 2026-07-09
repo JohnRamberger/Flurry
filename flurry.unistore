@@ -7,7 +7,7 @@
     "file": "flurry.unistore",
     "sheet": "flurry.t3x",
     "sheetURL": "https://raw.githubusercontent.com/JohnRamberger/Flurry/main/assets/store/flurry.t3x",
-    "revision": 1783560905,
+    "revision": 1783562122,
     "version": 3
   },
   "storeContent": [
@@ -15,7 +15,7 @@
       "info": {
         "title": "Flurry",
         "author": "JohnRamberger",
-        "description": "The Flurry streaming system module plus its loader (stable release). Install both, then launch Flurry Loader from the Home Menu.",
+        "description": "The Flurry streaming system module plus its loader (stable release). Install both, then launch Flurry Loader from the Home Menu. IMPORTANT: stop streaming before updating (Flurry Loader -> press A) or the console may crash.",
         "category": [
           "utility"
         ],
@@ -88,7 +88,7 @@
       "info": {
         "title": "Flurry (Nightly)",
         "author": "JohnRamberger",
-        "description": "Bleeding-edge prerelease builds from the latest commit on main, for testers. Install both, then launch Flurry Loader from the Home Menu.",
+        "description": "Bleeding-edge prerelease builds from the latest commit on main, for testers. Install both, then launch Flurry Loader from the Home Menu. IMPORTANT: stop streaming before updating (Flurry Loader -> press A) or the console may crash.",
         "category": [
           "utility"
         ],
@@ -96,7 +96,7 @@
           "3DS"
         ],
         "icon_index": 1,
-        "version": "v0.1.1.10"
+        "version": "v0.1.1.11"
       },
       "Install Flurry + Loader": [
         {
