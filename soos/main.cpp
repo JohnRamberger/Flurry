@@ -1,4 +1,4 @@
-#include <3ds.h>
+﻿#include <3ds.h>
 #include <3ds/gpu/gx.h>
 
 /*
@@ -444,10 +444,10 @@ static u16 v2_seq = 0;
 
 // Double-buffered capture. The strip DMA takes 10-20 ms on Old 3DS (the
 // legacy async pipeline existed to hide it under the encode of the previous
-// strip — "dma=0.3 ms/s" was overlap, not speed; a fully synchronous loop
+// strip â€” "dma=0.3 ms/s" was overlap, not speed; a fully synchronous loop
 // starves at <1 fps with mid-copy aborts wedging DMA channels). Each buffer
 // carries the metadata of the strip captured INTO it, so labels can never
-// desync from content — the failure mode of the legacy shared-state
+// desync from content â€” the failure mode of the legacy shared-state
 // pipeline (flicker / shuffled slices).
 typedef struct
 {
@@ -458,7 +458,16 @@ typedef struct
     u8 valid;    // a DMA was successfully started into this buffer
     u8 hwil;     // hardware-interlaced capture (New 3DS)
     u16 strip_x; // screen-space x of the strip
+    u32 dlen;    // destination byte count (for the completion sentinel)
 } capmeta;
+
+// Completion sentinel: svcGetDmaState is unreliable for inter-process DMA
+// on Old 3DS (it can fail outright), and trusting a fixed settle stops slow
+// transfers mid-copy â€” torn strips (flicker) and wedged DMA channels
+// (stutter/freeze bursts). The scheduler plants this value in the last
+// destination word; the transfer overwriting it is direct evidence the
+// copy reached the end.
+#define CAP_SENTINEL 0xF1A6F1A6u
 static u32* capbuf[2] = {nullptr, nullptr};
 static capmeta cmeta[2];
 
@@ -1037,7 +1046,7 @@ static bool netfuncIsProcidAlive(u32 procid)
 }
 
 // If framebuffers changed, do APT stuff (if necessary)
-// NOTE: old_captureinfo must be passed by pointer — it used to be taken by
+// NOTE: old_captureinfo must be passed by pointer â€” it used to be taken by
 // value, so the caller's copy never updated and "changed" re-triggered every
 // frame once an application was in the foreground, wedging the capture
 // thread in the NS retry loop below (stream froze in any app).
@@ -1173,7 +1182,7 @@ void newThreadMainFunction(void* __dummy_arg__)
     // Per-second perf accounting, reported to the client as a 1 Hz stats
     // packet (0xFF/0x03). Tick sums per stage = ms spent per wall second.
     u64 st_dma = 0, st_crc = 0, st_enc = 0, st_send = 0;
-    u32 st_sent = 0, st_skip = 0;
+    u32 st_sent = 0, st_skip = 0, st_torn = 0;
     u64 st_epoch_ms = osGetTime();
     u64 st_t0 = 0;
 
@@ -1245,7 +1254,7 @@ void newThreadMainFunction(void* __dummy_arg__)
     format[0] = capin.screencapture[0].format & 0b111;
     format[1] = capin.screencapture[1].format & 0b111;
 
-    // Hardware (DMA) interlacing: New 3DS only — the Old 3DS kernel
+    // Hardware (DMA) interlacing: New 3DS only â€” the Old 3DS kernel
     // data-aborts on gather-stride DMA configs (kernel crash, FAR=0x20).
     // Old 3DS interlaces in software instead (see the decimation pass in
     // the capture loop). 24bpp frames are excluded either way.
@@ -1348,7 +1357,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             // to the SAME (screen, strip) in the SAME iteration. The legacy
             // pipeline captured one iteration ahead of labeling, and every
             // desync (torn DMA, failed start, timing shifts) shipped strips
-            // with the wrong screen/index — flicker, shuffled slices. The
+            // with the wrong screen/index â€” flicker, shuffled slices. The
             // overlap it bought was worth ~0.3 ms/s (measured). ----
 
             // ---- Double-buffered capture ----
@@ -1359,31 +1368,46 @@ void newThreadMainFunction(void* __dummy_arg__)
             if(cap_pending >= 0 && cmeta[cap_pending].valid)
             {
                 st_t0 = svcGetSystemTick();
-                int dmaState = -1;
-                for(int i = 0; i < 400; i++)
+                // Completion = the sentinel in the last destination word got
+                // overwritten (direct evidence the copy reached the end);
+                // svcGetDmaState is only a fast-path hint since it can fail
+                // or lie for inter-process handles on Old 3DS.
+                volatile u32* sentinel =
+                    (volatile u32*)&capbuf[cap_pending][(cmeta[cap_pending].dlen / 4) - 1];
+                bool done = false;
+                for(int i = 0; i < 800; i++)
                 {
-                    if(svcGetDmaState(&dmaState, dmahand) < 0)
+                    if(*sentinel != CAP_SENTINEL)
                     {
-                        // Old-3DS kernels can fail this query for
-                        // inter-process DMA handles (legacy ignored the
-                        // result and raced the transfer). A short settle
-                        // covers any remainder.
-                        svcSleepThread(2e6);
-                        dmaState = 4;
+                        done = true;
                         break;
                     }
-                    if(dmaState == 4 || (i > 0 && dmaState == 0))
-                        break;
+                    if((i & 7) == 7)
+                    {
+                        int dmaState = -1;
+                        if(svcGetDmaState(&dmaState, dmahand) >= 0 && dmaState == 4
+                           && *sentinel != CAP_SENTINEL)
+                        {
+                            done = true;
+                            break;
+                        }
+                    }
                     svcSleepThread(5e4);
                 }
                 tryStopDma(&dmahand);
                 st_dma += svcGetSystemTick() - st_t0;
-                if(dmaState == 4 || dmaState == 0)
+                if(done)
                 {
                     ready = cap_pending;
                     have_ready = true;
                 }
-                // else: torn — dropped; the scheduler has already moved on.
+                else
+                {
+                    // Torn (or the strip legitimately ends in the sentinel
+                    // value â€” vanishingly rare): dropped, recaptured on the
+                    // next scheduler pass.
+                    st_torn++;
+                }
                 cap_pending = -1;
             }
 
@@ -1420,6 +1444,17 @@ void newThreadMainFunction(void* __dummy_arg__)
                     }
                     // workaround for DMA Siz Bug (refer to docs)
                     siz2 += (getFormatBpp(format[scr]) / 8) * (16 * stride[scr] - 16);
+
+                    // Destination length (32bpp sources gather to 24bpp) and
+                    // the completion sentinel in the last destination word.
+                    {
+                        u32 dbpp = getFormatBpp(format[scr]);
+                        if(dbpp == 32) dbpp = 24;
+                        u32 dl = (dbpp / 8) * 240 * stride[scr];
+                        if(m->hwil) dl /= 2;
+                        m->dlen = dl;
+                        capbuf[nxt][(dl / 4) - 1] = CAP_SENTINEL;
+                    }
 
                     int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
                     if(ret_dma < 0)
@@ -1512,7 +1547,7 @@ void newThreadMainFunction(void* __dummy_arg__)
 
             // Flurry extension: skip unchanged strips (PROTOCOL.md A.1).
             // screenbuf holds the strip just captured for screen `scr`,
-            // strip `offs[scr]`. crc32 it (cheap; ~100µs) and skip the
+            // strip `offs[scr]`. crc32 it (cheap; ~100Âµs) and skip the
             // expensive encode + send when nothing changed, unless the
             // refresh interval forces a resend.
             bool skipsend = dma_torn; // torn strips are dropped, not encoded
@@ -1694,8 +1729,8 @@ void newThreadMainFunction(void* __dummy_arg__)
                     // libctru; not defined in the legacy 1.2.1 headers).
                     const double tick2ms = 1000.0 / 268123480.0;
                     int stlen = sprintf((char*)(soc->bufferptr + bufsoc_pak_data_offset),
-                        "sent=%lu skip=%lu\ndma=%.1f crc=%.1f enc=%.1f send=%.1f (ms/s)\nq=%u chunks=%lu mode=%c",
-                        (unsigned long)st_sent, (unsigned long)st_skip,
+                        "sent=%lu skip=%lu torn=%lu\ndma=%.1f crc=%.1f enc=%.1f send=%.1f (ms/s)\nq=%u chunks=%lu mode=%c",
+                        (unsigned long)st_sent, (unsigned long)st_skip, (unsigned long)st_torn,
                         st_dma * tick2ms, st_crc * tick2ms,
                         st_enc * tick2ms, st_send * tick2ms,
                         (unsigned int)cfgblk[1], (unsigned long)limit[scr],
@@ -1709,7 +1744,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                         soc->wribuf();
                     }
                     st_dma = st_crc = st_enc = st_send = 0;
-                    st_sent = st_skip = 0;
+                    st_sent = st_skip = st_torn = 0;
                     st_epoch_ms = st_now;
                 }
                 else if(!cfgblk[12])
@@ -1719,7 +1754,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                     if(st_now - st_epoch_ms >= 1000)
                     {
                         st_dma = st_crc = st_enc = st_send = 0;
-                        st_sent = st_skip = 0;
+                        st_sent = st_skip = st_torn = 0;
                         st_epoch_ms = st_now;
                     }
                 }
@@ -1727,7 +1762,7 @@ void newThreadMainFunction(void* __dummy_arg__)
 
             // Chunk-count change (Flurry extension): reallocate screenbuf at
             // this safe point (frame already sent). A DMA into screenbuf may
-            // be in flight — stop it before freeing. One garbage strip may
+            // be in flight â€” stop it before freeing. One garbage strip may
             // be sent right after; the refresh interval heals it.
             if(chunks_realloc_needed && isold)
             {
@@ -1778,7 +1813,7 @@ void newThreadMainFunction(void* __dummy_arg__)
         else
         {
             // Capture info unavailable (suspected while some homebrew apps
-            // are in the foreground) — report once per failure streak so a
+            // are in the foreground) â€” report once per failure streak so a
             // connected client can see why the stream went quiet.
             if(soc && !import_fail_reported)
             {
