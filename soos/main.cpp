@@ -435,6 +435,10 @@ static bool interlacedRowSwitch = false;
 static bool isStoredFrameInterlaced = false;
 static bool isDmaSetForInterlaced = false;
 
+// Set while GSPGPU_ImportDisplayCaptureInfo keeps failing, so the error is
+// reported to the client once per streak instead of every iteration.
+static bool import_fail_reported = false;
+
 // Flurry extension state (PROTOCOL.md A.1).
 // crc32 of the last-sent content per [interlace phase][screen][strip],
 // plus a frames-since-last-sent age per strip for the refresh interval.
@@ -988,6 +992,11 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
             // If the framebuffer is in VRAM, we don't have to do anything special(...?)
             // (Such is the case for all retail applets, apparently.)
             tryStopDma(&dmahand);
+
+            // Telemetry: which capture route this foreground app takes.
+            if(soc)
+                soc->errformat((char*)"capture: vram fb, vaddr=%08X",
+                               (u32)new_captureinfo.screencapture[0].framebuf0_vaddr);
         }
         else //use APT fuckery, auto-assume this is an application
         {
@@ -1039,7 +1048,8 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
             // Telemetry through the stream so the connected client can show
             // what the app-capture path decided (shows up as "3DS: ...").
             if(soc)
-                soc->errformat((char*)"capture: app fb, progid=%08X%08X loaded=%i media=%i ns=%08X pid=%u",
+                soc->errformat((char*)"capture: app fb, vaddr=%08X progid=%08X%08X loaded=%i media=%i ns=%08X pid=%u",
+                               (u32)new_captureinfo.screencapture[0].framebuf0_vaddr,
                                (u32)(progid >> 32), (u32)progid, (int)loaded,
                                (int)mediatype, (u32)nsret, (unsigned int)*procid);
 
@@ -1167,8 +1177,10 @@ void newThreadMainFunction(void* __dummy_arg__)
         sendDebugFrametimeStats(timems_processframe,timems_writetosocbuf,&timems_dmaasync,timems_formatconvert);
 #endif
 
-        if(GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
+        Result impret = GSPGPU_ImportDisplayCaptureInfo(&capin);
+        if(impret >= 0)
         {
+            import_fail_reported = false;
             netfuncTestFramebuffer(&procid,capin,&oldcapin);
 
             format[0] = capin.screencapture[0].format & 0b111;
@@ -1393,7 +1405,18 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // 5 x 10 ^ 6 nanoseconds (iirc)
             }
         }
-        else yield();
+        else
+        {
+            // Capture info unavailable (suspected while some homebrew apps
+            // are in the foreground) — report once per failure streak so a
+            // connected client can see why the stream went quiet.
+            if(soc && !import_fail_reported)
+            {
+                import_fail_reported = true;
+                soc->errformat((char*)"capture: ImportDisplayCaptureInfo failed, ret=%08X", (u32)impret);
+            }
+            yield();
+        }
     }
     // Notif LED = Flashing yellow and purple
     memset(&pat.r[0], 0xFF, 16);
