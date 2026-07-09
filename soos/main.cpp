@@ -953,6 +953,19 @@ u8 getFormatBpp(u32 my_format)
     }
 }
 
+// Capture route of the previous framebuffer change: 0 unknown, 1 VRAM,
+// 2 application. Used to rate-limit telemetry and detect route switches.
+static u8 last_route = 0;
+
+static bool netfuncIsProcidAlive(u32 procid)
+{
+    Handle h = 0;
+    if(svcOpenProcess(&h, procid) < 0)
+        return false;
+    svcCloseHandle(h);
+    return true;
+}
+
 // If framebuffers changed, do APT stuff (if necessary)
 // NOTE: old_captureinfo must be passed by pointer — it used to be taken by
 // value, so the caller's copy never updated and "changed" re-triggered every
@@ -983,23 +996,38 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
 
     if(is_changed)
     {
-        *procid = 0;
+        u32 fbva = (u32)new_captureinfo.screencapture[0].framebuf0_vaddr;
 
-        //test for VRAM
-        if( (u32)(new_captureinfo.screencapture[0].framebuf0_vaddr) < 0x1F600000 )
+        // Real VRAM only: 0x1F000000-0x1F5FFFFF (retail applets render
+        // there). Application linear heap lives at 0x30000000+ for
+        // commercial titles and 0x14000000+ for libctru homebrew. The old
+        // check (fbva < 0x1F600000) misrouted homebrew framebuffers to the
+        // VRAM path, so the sysmodule DMA'd 0x14000000 of its OWN address
+        // space and homebrew apps froze the stream.
+        bool is_vram = (fbva >= 0x1F000000) && (fbva < 0x1F600000);
+
+        if(is_vram)
         {
-            // nothing to do?
+            *procid = 0;
             // If the framebuffer is in VRAM, we don't have to do anything special(...?)
             // (Such is the case for all retail applets, apparently.)
             tryStopDma(&dmahand);
 
-            // Telemetry: which capture route this foreground app takes.
-            if(soc)
-                soc->errformat((char*)"capture: vram fb, vaddr=%08X",
-                               (u32)new_captureinfo.screencapture[0].framebuf0_vaddr);
+            // Telemetry: report route changes, not every buffer swap.
+            if(soc && last_route != 1)
+                soc->errformat((char*)"capture: vram fb, vaddr=%08X", fbva);
+            last_route = 1;
+        }
+        else if(*procid && netfuncIsProcidAlive(*procid))
+        {
+            // Still the same (double-buffered) application flipping between
+            // its two framebuffers; keep the known procid instead of
+            // re-running the APT/NS discovery every swap.
         }
         else //use APT fuckery, auto-assume this is an application
         {
+            *procid = 0;
+            last_route = 2;
             // Notif LED = Flashing red and green
             memset(&pat.r[0], 0xFF, 16);
             memset(&pat.r[16], 0, 16);
@@ -1090,10 +1118,12 @@ void newThreadMainFunction(void* __dummy_arg__)
 
     threadrunning = 1;
 
-    // Fresh connection: forget strip crcs and pacing from the previous one.
+    // Fresh connection: forget strip crcs, pacing, and capture route state.
     memset(strip_crc, 0, sizeof(strip_crc));
     memset(strip_age, 0, sizeof(strip_age));
     pace_last = 0;
+    last_route = 0;
+    import_fail_reported = false;
 
     if(isold == 0){
         osSetSpeedupEnable(1);
