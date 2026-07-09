@@ -1364,8 +1364,13 @@ void newThreadMainFunction(void* __dummy_arg__)
         sendDebugFrametimeStats(timems_processframe,timems_writetosocbuf,&timems_dmaasync,timems_formatconvert);
 #endif
 
-        if(housekeep)
-            impret = GSPGPU_ImportDisplayCaptureInfo(&capin);
+        // Capture info refreshes EVERY pass: framebuf0_vaddr tracks the
+        // app's buffer swaps (60 Hz), and reading it on the old 50 ms
+        // housekeeping cadence meant capturing the buffer being actively
+        // redrawn half the time — mid-draw frames (cellwatch: version-text
+        // cell genuinely alternating content; color flicker; source-side
+        // tearing). The rest of the housekeeping stays throttled.
+        impret = GSPGPU_ImportDisplayCaptureInfo(&capin);
         if(impret >= 0)
         {
             if(housekeep)
@@ -1794,6 +1799,65 @@ void newThreadMainFunction(void* __dummy_arg__)
                             dst += h_px * capbpc;
                         }
                         v2raw_built = true;
+                    }
+                    else if(cfgblk[4] == 0)
+                    {
+                        // Large dirty area: JPEG of the dirty RECT (via
+                        // pitch), not the whole strip — exact update bounds
+                        // and encode cost that scales with the change.
+                        st_t0 = svcGetSystemTick();
+                        u32 ebpc = capbpc;
+                        if(ebpc == 2)
+                        {
+                            // libjpeg-turbo has no 565 input; expand the
+                            // strip in place (same cost the old full-strip
+                            // path paid).
+                            convert16to24_rgb565(stride[scr], 240, (u8*)screenbuf);
+                            ebpc = 3;
+                        }
+                        u8* b = soc->bufferptr;
+                        u8* dest = b + 26;
+                        unsigned long jsz = (unsigned long)(soc->bufsize - 32);
+                        const u8* srcp = (const u8*)screenbuf
+                            + (((u32)minr * cw) * 240 + (u32)mins * ch) * ebpc;
+                        if(!tjCompress2(jencode, (u8*)srcp, (int)h_px, (int)(240 * ebpc),
+                                        (int)w_cols, TJPF_RGB, &dest, &jsz,
+                                        TJSAMP_420, cfgblk[1],
+                                        TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
+                        {
+                            b[0] = 0x90; // SFRAME
+                            b[1] = (u8)scr;
+                            b[2] = (u8)(v2_seq & 0xFF);
+                            b[3] = (u8)(v2_seq >> 8);
+                            v2_seq++;
+                            soc->setPakSize(4 + 14 + (u32)jsz);
+                            b[8] = 0;
+                            b[9] = 1;
+                            b[10] = 0;
+                            b[11] = 0;
+                            u8* rh = b + 12;
+                            u16 rx = (u16)(strip_x + (u32)minr * cw);
+                            u16 ry = (u16)((cellsegs - 1 - (u32)maxs) * ch);
+                            rh[0] = rx & 0xFF; rh[1] = rx >> 8;
+                            rh[2] = ry & 0xFF; rh[3] = ry >> 8;
+                            rh[4] = w_cols & 0xFF; rh[5] = (w_cols >> 8) & 0xFF;
+                            rh[6] = h_px & 0xFF; rh[7] = (h_px >> 8) & 0xFF;
+                            rh[8] = 1; // codec: JPEG
+                            rh[9] = 0;
+                            rh[10] = jsz & 0xFF;
+                            rh[11] = (jsz >> 8) & 0xFF;
+                            rh[12] = (jsz >> 16) & 0xFF;
+                            rh[13] = (jsz >> 24) & 0xFF;
+                            v2raw_built = true;
+                        }
+                        else
+                        {
+                            // Encode failed after a possible in-place 565
+                            // expansion: the buffer is no longer valid for
+                            // the legacy path — drop this pass.
+                            skipsend = true;
+                        }
+                        st_enc += svcGetSystemTick() - st_t0;
                     }
                 }
             }
