@@ -165,6 +165,19 @@ static void drawTestPattern(u8* fb, u32 frame)
     // version, top-right (visible in the stream itself)
     const char* v = FLURRY_VERSION;
     drawText(fb, 400 - 4 - textWidth(v), 4, v, 198, 236, 255);
+
+    // Color-calibration swatches, bottom-left, left-to-right R, G, B by
+    // setpix intent. Ground truth for every channel-order question: what
+    // the CONSOLE shows reveals the real framebuffer packing; what the
+    // CLIENT shows reveals each decode path. Compare one photo + one
+    // screenshot.
+    for(int sy = 190; sy < 214; sy++)
+        for(int sx = 0; sx < 24; sx++)
+        {
+            setpix(fb, 8 + sx, sy, 255, 0, 0);   // intended RED
+            setpix(fb, 40 + sx, sy, 0, 255, 0);  // intended GREEN
+            setpix(fb, 72 + sx, sy, 0, 0, 255);  // intended BLUE
+        }
 }
 
 // ---------------------------------------------------------------------------

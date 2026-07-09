@@ -466,6 +466,8 @@ typedef struct
 static u64 dma_ema_ticks = 0;
 // Once-per-streak reporter for torn (sentinel-timeout) captures.
 static bool torn_reported = false;
+// Rate limiter for the cellwatch diagnostic (phantom top-right cell).
+static u64 cellwatch_ms = 0;
 
 // Completion sentinel: svcGetDmaState is unreliable for inter-process DMA
 // on Old 3DS (it can fail outright), and trusting a fixed settle stops slow
@@ -1691,6 +1693,27 @@ void newThreadMainFunction(void* __dummy_arg__)
                         u32* slot = &cell_crc[scr][cap_strip & 7][cr][cs];
                         if(*slot != c)
                         {
+                            // cellwatch: byte-level truth for the phantom
+                            // top-right cell (version text). Reports which
+                            // capture buffer, the new crc, and the last
+                            // data word + first pad word — distinguishes
+                            // sentinel leakage / per-buffer divergence /
+                            // genuine content changes in one run.
+                            if(soc && scr == 0 && cap_strip == limit[0] - 1
+                               && cr == cellcols - 1 && cs == cellsegs - 1)
+                            {
+                                u64 cw_now = osGetTime();
+                                if(cw_now - cellwatch_ms >= 500)
+                                {
+                                    cellwatch_ms = cw_now;
+                                    u32* w = (u32*)screenbuf;
+                                    u32 last_i = cmeta[ready].dlen / 4 - 1;
+                                    soc->errformat((char*)"cellwatch: buf=%d old=%08X new=%08X last=%08X pad=%08X",
+                                                   ready, (unsigned int)*slot, (unsigned int)c,
+                                                   (unsigned int)w[last_i],
+                                                   (unsigned int)w[last_i + 1]);
+                                }
+                            }
                             *slot = c;
                             if((int)cr < minr) minr = (int)cr;
                             if((int)cr > maxr) maxr = (int)cr;
