@@ -432,7 +432,6 @@ static TickCounter tick_ctr_2_dma;
 // true  = even rows (2-240, DMA start position is offset)
 static bool interlacedRowSwitch = false;
 
-static bool isStoredFrameInterlaced = false;
 static bool isDmaSetForInterlaced = false;
 
 // Set while GSPGPU_ImportDisplayCaptureInfo keeps failing, so the error is
@@ -1308,31 +1307,79 @@ void newThreadMainFunction(void* __dummy_arg__)
             }
             }
 
-            int dmaState = 0;
-            st_t0 = svcGetSystemTick();
-            for(int i = 0; i < 60; i++) // Should cover all cases.
+            // ---- Synchronous capture: DMA, wait, encode and send all refer
+            // to the SAME (screen, strip) in the SAME iteration. The legacy
+            // pipeline captured one iteration ahead of labeling, and every
+            // desync (torn DMA, failed start, timing shifts) shipped strips
+            // with the wrong screen/index — flicker, shuffled slices. The
+            // overlap it bought was worth ~0.3 ms/s (measured). ----
+
+            u32 region_siz = capin.screencapture[scr].framebuf_widthbytesize * stride[scr];
+            bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240; // bytes per pixel (dumb)
+            scrw = 240; // sure
+            bits = 4 << bsiz; // bpp (dumb)
+
+            Handle prochand = 0;
+            if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
+
+            u32 srcprochand = prochand ? prochand : 0xFFFF8001;
+            u8* srcaddr = (u8*)capin.screencapture[scr].framebuf0_vaddr + (region_siz * offs[scr]);
+
+#if DEBUG_VERBOSE==1
+            osTickCounterUpdate(&tick_ctr_2_dma);
+#endif
+
+            siz = (getFormatBpp(format[scr]) / 8) * scrw * stride[scr];
+
+            // Hardware (DMA) interlace: capture one field of this frame.
+            bool hwInterlaced = false;
+            if(isDmaSetForInterlaced)
             {
-                svcGetDmaState(&dmaState, dmahand);
-                if(dmaState == 4 || dmaState == 0) // 4 = DMASTATE_DONE; 0 = why dude
-                    break;
-                svcSleepThread(5e4); // Going higher (5e6, for example) may result in crashes.
+                hwInterlaced = true;
+                siz = siz / 2;
+                if(interlacedRowSwitch)
+                    srcaddr += getFormatBpp(format[scr])/8;
+            }
+
+            // workaround for DMA Siz Bug (refer to docs)
+            siz += (getFormatBpp(format[scr])/8) * (16 * stride[scr] - 16);
+
+            st_t0 = svcGetSystemTick();
+            int ret_dma = svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr]);
+
+            bool dma_torn;
+            if(ret_dma < 0)
+            {
+                procid = 0;
+                format[scr] = 0xF00FCACE; //invalidate
+                dma_torn = true; // nothing valid captured this pass
+            }
+            else
+            {
+                int dmaState = 0;
+                for(int i = 0; i < 100; i++)
+                {
+                    svcGetDmaState(&dmaState, dmahand);
+                    if(dmaState == 4 || dmaState == 0) // 4 = DMASTATE_DONE; 0 = why dude
+                        break;
+                    svcSleepThread(5e4); // Going higher (5e6, for example) may result in crashes.
+                }
+                tryStopDma(&dmahand);
+                // Still unfinished after the budget: buffer is torn — drop
+                // the strip rather than encode mixed content.
+                dma_torn = (dmaState != 4 && dmaState != 0);
+#if DEBUG_BASIC==1
+                if(dma_torn)
+                    printf("DMA transfer not finished, stopping manually...\ndmaState=%i\n", dmaState);
+#endif
             }
             st_dma += svcGetSystemTick() - st_t0;
 
-            tryStopDma(&dmahand);
-
-            // DMA still running after the wait budget: screenbuf is TORN
-            // (new screen's pixels partially over the previous screen's).
-            // Encoding it ships mislabeled mixed content — visible as the
-            // other screen flickering through. Drop the strip instead; the
-            // next pass recaptures it. (The old fixed 5 ms sleep masked
-            // this; strip-skip + sleep 0 exposed it.)
-            bool dma_torn = (dmaState != 4 && dmaState != 0);
-
-#if DEBUG_BASIC==1
-            if(dma_torn)
-                printf("DMA transfer not finished, stopping manually...\ndmaState=%i\n", dmaState);
-#endif
+            if(prochand)
+            {
+                svcCloseHandle(prochand);
+                prochand = 0;
+            }
 
             int imgsize = 0;
 
@@ -1340,22 +1387,22 @@ void newThreadMainFunction(void* __dummy_arg__)
                 svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf, capin.screencapture[scr].framebuf_widthbytesize * 400);
             }
 
-            // interlaced
-            if(isStoredFrameInterlaced)
+            // interlaced (hardware): the captured data is one field
+            if(hwInterlaced)
             {
                 scrw = scrw / 2;
             }
 
             // Flurry extension: skip unchanged strips (PROTOCOL.md A.1).
-            // screenbuf holds the strip DMA'd last iteration for screen
-            // `scr`, strip `offs[scr]`. crc32 it (cheap; ~100µs) and skip
-            // the expensive encode + send when nothing changed, unless the
+            // screenbuf holds the strip just captured for screen `scr`,
+            // strip `offs[scr]`. crc32 it (cheap; ~100µs) and skip the
+            // expensive encode + send when nothing changed, unless the
             // refresh interval forces a resend.
             bool skipsend = dma_torn; // torn strips are dropped, not encoded
             if(!dma_torn && cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
             {
                 u32 crclen = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
-                if(isStoredFrameInterlaced)
+                if(hwInterlaced)
                     crclen /= 2;
                 // Never crc past the screenbuf allocation (sized for 24bpp).
                 u32 crccap = stride[scr] * 240 * 3;
@@ -1413,11 +1460,12 @@ void newThreadMainFunction(void* __dummy_arg__)
                     u32 halfpx = (240 / 2) * stride[scr];
                     for(u32 i = 0; i < halfpx; i++)
                         px16[i] = px16[i * 2 + ph];
-                    isStoredFrameInterlaced = true;
                     softInterlaced = true;
                 }
                 scrw = 120;
             }
+
+            bool frameInterlaced = hwInterlaced || softInterlaced;
 
             if(skipsend)
             {
@@ -1432,10 +1480,10 @@ void newThreadMainFunction(void* __dummy_arg__)
             switch(cfgblk[4])
             {
             case 0:
-                makeJpegImage(&timems_formatconvert, &timems_processframe, scr, &scrw, &bsiz, &imgsize, format, isStoredFrameInterlaced, interlacedRowSwitch);
+                makeJpegImage(&timems_formatconvert, &timems_processframe, scr, &scrw, &bsiz, &imgsize, format, frameInterlaced, interlacedRowSwitch);
                 break;
             case 1:
-                makeTargaImage(&timems_formatconvert, &timems_processframe, scr, &scrw, &bits, &imgsize, format, isStoredFrameInterlaced, interlacedRowSwitch);
+                makeTargaImage(&timems_formatconvert, &timems_processframe, scr, &scrw, &bits, &imgsize, format, frameInterlaced, interlacedRowSwitch);
                 break;
             default:
                 break; // This case shouldn't occur.
@@ -1456,88 +1504,6 @@ void newThreadMainFunction(void* __dummy_arg__)
                     offs[scr] = 0;
             }
 
-            // screen switch. Interlace holds the screen so its second field
-            // goes out next — but only when the frame actually WAS
-            // interlaced: a screen that can't decimate (e.g. a 24bpp bottom
-            // framebuffer) never toggles the field phase, and holding on it
-            // deadlocks the loop there, starving the other screen.
-            if(interlacedRowSwitch == false || cfgblk[5] == 0
-               || !(softInterlaced || isStoredFrameInterlaced))
-            {
-                if(cfgblk[3] == 1) // Top Screen Only
-                    scr = 0;
-                else if(cfgblk[3] == 2) // Bottom Screen Only
-                    scr = 1;
-                else if(cfgblk[3] == 3) // Both Screens
-                    scr = !scr;
-            }
-
-            siz = (capin.screencapture[scr].framebuf_widthbytesize * stride[scr]); // Size of the entire frame (in bytes)
-            bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240; // bytes per pixel (dumb)
-            scrw = 240; // sure
-            bits = 4 << bsiz; // bpp (dumb)
-
-
-            Handle prochand = 0;
-            if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
-
-            u32 srcprochand = prochand ? prochand : 0xFFFF8001;
-            u8* srcaddr = (u8*)capin.screencapture[scr].framebuf0_vaddr + (siz * offs[scr]);
-
-#if DEBUG_VERBOSE==1
-            osTickCounterUpdate(&tick_ctr_2_dma);
-#endif
-
-            siz = (getFormatBpp(format[scr]) / 8) * scrw * stride[scr];
-
-            if(isDmaSetForInterlaced)
-            {
-                isStoredFrameInterlaced = true;
-                siz = siz / 2;
-                interlacedRowSwitch = !interlacedRowSwitch;
-                if(interlacedRowSwitch)
-                    srcaddr += getFormatBpp(format[scr])/8;
-            }
-            else
-            {
-                isStoredFrameInterlaced = false;
-                // Software decimation advances the sample phase here, at the
-                // same pipeline point the hardware path would.
-                if(softInterlaced || softDownscaled)
-                    interlacedRowSwitch = !interlacedRowSwitch;
-                enc_rows_override = 0;
-            }
-
-            // workaround for DMA Siz Bug (refer to docs)
-            siz += (getFormatBpp(format[scr])/8) * (16 * stride[scr] - 16);
-
-
-            int ret_dma = svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr]);
-
-            if(ret_dma < 0)
-            {
-                procid = 0;
-                format[scr] = 0xF00FCACE; //invalidate
-            }
-            else
-            {
-#if DEBUG_VERBOSE==1
-                if(dmastatusthreadrunning == 0)
-                {
-                    // Note: At lowest possible priority, results will be less consistent
-                    // and on average less accurate. But it still produces usable results
-                    // every once in a while, and this isn't a high-priority feature anyway.
-                    threadCreate(waitforDMAtoFinish, nullptr, 0x80, 0x3F, 0, true);
-                }
-#endif
-            }
-
-            if(prochand)
-            {
-                svcCloseHandle(prochand);
-                prochand = 0;
-            }
-
             // If size is 0, don't send the packet.
             if(soc->getPakSize())
             {
@@ -1554,6 +1520,26 @@ void newThreadMainFunction(void* __dummy_arg__)
                 osTickCounterUpdate(&tick_ctr_1);
                 timems_writetosocbuf = osTickCounterRead(&tick_ctr_1);
 #endif
+            }
+
+            // Advance — AFTER the send, so every label matched the captured
+            // content. Sample phase first, then the screen.
+            if(frameInterlaced || softDownscaled)
+                interlacedRowSwitch = !interlacedRowSwitch;
+            enc_rows_override = 0;
+
+            // Hold the screen while its second field is pending (post-toggle
+            // phase true = field B next) — only when this frame really was
+            // interlaced, otherwise holding deadlocks on screens that can't
+            // decimate (e.g. 24bpp framebuffers).
+            if(!(frameInterlaced && interlacedRowSwitch))
+            {
+                if(cfgblk[3] == 1) // Top Screen Only
+                    scr = 0;
+                else if(cfgblk[3] == 2) // Bottom Screen Only
+                    scr = 1;
+                else if(cfgblk[3] == 3) // Both Screens
+                    scr = !scr;
             }
 
             // 1 Hz perf stats to the client (0xFF/0x03). Sums are ms spent
