@@ -1481,6 +1481,13 @@ void newThreadMainFunction(void* __dummy_arg__)
                     {
                         procid = 0;
                         format[scr] = 0xF00FCACE; //invalidate
+                        // Force the next housekeeping pass to re-run process
+                        // discovery even without a new framebuffer change:
+                        // failing here usually means procid was stale/absent
+                        // for app-memory capture, and discovery otherwise
+                        // only retriggers on fb-change events.
+                        memset(&oldcapin, 0, sizeof(oldcapin));
+                        last_route = 0;
                         if(soc && !dmafail_reported)
                         {
                             dmafail_reported = true;
