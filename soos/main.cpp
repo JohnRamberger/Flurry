@@ -817,7 +817,7 @@ int netfuncWaitForSettings()
                     return 1;
 
                 case 0x09: // Flurry extension: chunk count (Old 3DS): 2, 4 or 8
-                    if((j == 2 || j == 4 || j == 8) && isold && cfgblk[CFG_CHUNKS] != j)
+                    if((j == 1 || j == 2 || j == 4 || j == 8) && isold && cfgblk[CFG_CHUNKS] != j)
                     {
                         cfgblk[CFG_CHUNKS] = j;
                         chunks_realloc_needed = 1;
@@ -920,10 +920,16 @@ int allocateScreenbufMem(u32** myscreenbuf)
         // fewer, larger strips cut per-strip encode setup and socket IPC.
         // 2 is the floor: full frames would need a bigger socket buffer.
         // TGA is RLE with a large worst case, so it keeps the 8-chunk bound.
+        // c=1 = full-frame capture (one DMA/screen, all pixels the same
+        // instant → no capture skew, like New 3DS). Feasible now that the
+        // cell grid never sends a full RAW frame (only dirty rects or a
+        // full-frame JPEG, both fit the socket buffer). Flurry runs as a
+        // 64MB app, so the 288 KB buffer is fine. TGA keeps 8 chunks (RLE
+        // worst case must fit the socket buffer).
         u32 c = cfgblk[CFG_CHUNKS];
-        if(c != 2 && c != 4)
+        if(c != 1 && c != 2 && c != 4)
             c = 8;
-        if(cfgblk[CFG_FORMAT] == 1)
+        if(cfgblk[CFG_FORMAT] == 1 && c == 1)
             c = 8;
         limit[0] = c; // Capture the screen in c chunks
         limit[1] = c;
