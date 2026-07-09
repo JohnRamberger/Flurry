@@ -331,7 +331,7 @@ into a single send:
 ```
 [0x90][screen u8][seq u16][payload_len u32]
   [pass_flags u8][region_count u8][reserved u16]
-  region: [x u16][y u16][w u16][h u16][codec u8][flags u8][len u16][data…]
+  region: [x u16][y u16][w u16][h u16][codec u8][flags u8][len u32][data…]
 ```
 
 - Coordinates are **screen space** (x 0–399/319 left→right, y 0–239
