@@ -267,9 +267,9 @@ clients ignore the announce packet.
 **Announce** — sent once by extended sysmodules immediately after the client
 connects: type `0xFF`, subtype `0x04`, payload
 `[announce_rev: u8][features: u8]`. Feature bits: bit 0 = strip skip,
-bit 1 = fps cap, bit 2 = Old-3DS interlace. A client that has not received
-an announce within ~1 s must assume a pre-extension sysmodule and only use
-subtypes 0x01–0x05.
+bit 1 = fps cap, bit 2 = Old-3DS interlace, bit 3 = chunk count,
+bit 4 = strip sleep. A client that has not received an announce within ~1 s
+must assume a pre-extension sysmodule and only use subtypes 0x01–0x05.
 
 **New settings** (type `0x04`, u8 payload each):
 
@@ -278,6 +278,8 @@ subtypes 0x01–0x05.
 | 0x06 | Strip skip | bool — don't send strips whose content (crc32) is unchanged |
 | 0x07 | Refresh interval | force-send every N frames per strip, 0 = never |
 | 0x08 | FPS cap | target fps, 0 = uncapped |
+| 0x09 | Chunk count | strips per screen on Old 3DS: 2, 4 or 8 (default 8; TGA forces 8). Clients must reassemble by pasting chunk *i* at offset *i × decoded-image-height* — never assume 8 |
+| 0x0A | Strip sleep | ms pause between strips on Old 3DS, 0–20 (default 5; 0 disables the pacing floor) |
 
 Strip skip requires the client to keep a persistent per-screen buffer (a
 skipped strip simply stays stale until it changes or the refresh interval

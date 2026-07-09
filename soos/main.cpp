@@ -446,6 +446,9 @@ static u32 strip_crc[2][2][8];
 static u8 strip_age[2][2][8];
 // osGetTime() of the previous paced iteration (fps cap, cfgblk[8]).
 static u64 pace_last = 0;
+// Set when the chunk count (cfgblk[9]) or format changes and screenbuf must
+// be reallocated at the next safe point in the capture loop.
+static vu8 chunks_realloc_needed = 0;
 
 // Based on (and slightly modified from) devkitpro/libctru source
 //
@@ -665,7 +668,13 @@ int netfuncWaitForSettings()
 
                 case 0x04: // Image Format (JPEG or TGA?)
                     if(j < 2)
+                    {
+                        // Chunk sizing depends on the format (TGA forces 8);
+                        // reallocate if a custom chunk count is in play.
+                        if(isold && j != cfgblk[4] && cfgblk[9])
+                            chunks_realloc_needed = 1;
                         cfgblk[4] = j;
+                    }
                     return 1;
 
                 case 0x05: // Request to use Interlacing (yes or no)
@@ -698,6 +707,18 @@ int netfuncWaitForSettings()
 
                 case 0x08: // Flurry extension: fps cap (0 = uncapped)
                     cfgblk[8] = (j > 60) ? 60 : j;
+                    return 1;
+
+                case 0x09: // Flurry extension: chunk count (Old 3DS): 2, 4 or 8
+                    if((j == 2 || j == 4 || j == 8) && isold && cfgblk[9] != j)
+                    {
+                        cfgblk[9] = j;
+                        chunks_realloc_needed = 1;
+                    }
+                    return 1;
+
+                case 0x0A: // Flurry extension: per-strip sleep ms (Old 3DS pacing floor)
+                    cfgblk[10] = (j > 20) ? 20 : j;
                     return 1;
 
                 default:
@@ -759,11 +780,20 @@ int allocateScreenbufMem(u32** myscreenbuf)
         else
         {
         */
-        limit[0] = 8; // Capture the screen in 8 chunks
-        limit[1] = 8;
-        stride[0] = 50; // Screen / Framebuffer width (divided by 8)
-        stride[1] = 40;
-        screenbuf_siz = 50 * 240 * 3;
+        // Chunk count (Flurry extension, setting 0x09 -> cfgblk[9]):
+        // fewer, larger strips cut per-strip encode setup and socket IPC.
+        // 2 is the floor: full frames would need a bigger socket buffer.
+        // TGA is RLE with a large worst case, so it keeps the 8-chunk bound.
+        u32 c = cfgblk[9];
+        if(c != 2 && c != 4)
+            c = 8;
+        if(cfgblk[4] == 1)
+            c = 8;
+        limit[0] = c; // Capture the screen in c chunks
+        limit[1] = c;
+        stride[0] = 400 / c; // Screen / Framebuffer width (divided by c)
+        stride[1] = 320 / c;
+        screenbuf_siz = (400 / c) * 240 * 3;
     }
     else
     {
@@ -1467,6 +1497,31 @@ void newThreadMainFunction(void* __dummy_arg__)
                 }
             }
 
+            // Chunk-count change (Flurry extension): reallocate screenbuf at
+            // this safe point (frame already sent). A DMA into screenbuf may
+            // be in flight — stop it before freeing. One garbage strip may
+            // be sent right after; the refresh interval heals it.
+            if(chunks_realloc_needed && isold)
+            {
+                chunks_realloc_needed = 0;
+                tryStopDma(&dmahand);
+                free(screenbuf);
+                screenbuf = nullptr;
+                if(allocateScreenbufMem(&screenbuf) < 0)
+                {
+                    // Not enough contiguous heap for the bigger strips:
+                    // fall back to the default 8 chunks.
+                    cfgblk[9] = 0;
+                    allocateScreenbufMem(&screenbuf);
+                }
+                offs[0] = 0;
+                offs[1] = 0;
+                memset(strip_crc, 0, sizeof(strip_crc));
+                memset(strip_age, 0, sizeof(strip_age));
+                if(soc)
+                    soc->errformat((char*)"chunks: now %u per screen", (unsigned int)limit[0]);
+            }
+
             // Frame pacing. With an fps cap (Flurry extension, cfgblk[8]),
             // pace iterations so full frames hit the target rate; otherwise
             // keep the legacy fixed Old-3DS sleep.
@@ -1480,9 +1535,12 @@ void newThreadMainFunction(void* __dummy_arg__)
                 pace_last = osGetTime();
             }
             else if(isold){
-                // TODO: Fine-tune Old-3DS performance.
-                svcSleepThread(5e6);
-                // 5 x 10 ^ 6 nanoseconds (iirc)
+                // Legacy fixed pause between strips, now tunable (Flurry
+                // extension setting 0x0A -> cfgblk[10], ms; 0 disables).
+                // Gives syscore services (nwm/WiFi) breathing room; lower
+                // at your own risk.
+                if(cfgblk[10])
+                    svcSleepThread((u64)cfgblk[10] * 1000000ULL);
             }
         }
         else
@@ -1576,6 +1634,7 @@ int main()
     cfgblk[1] = 70; // JPEG quality
     cfgblk[3] = 1;  // top screen
     cfgblk[7] = 64; // strip-skip refresh interval (frames)
+    cfgblk[10] = 5; // per-strip sleep ms (legacy Old-3DS pacing floor)
 
     u32 soc_service_buf_siz = 0;
     u32 screenbuf_siz = 0;
@@ -1795,7 +1854,7 @@ int main()
                     soc->setPakSubtype(0x04);
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
-                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00000011; // strip-skip | fps-cap
+                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00011011; // strip-skip | fps-cap | chunks | strip-sleep
                     soc->setPakSize(2);
                     soc->wribuf();
 
