@@ -1248,10 +1248,19 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
             // Telemetry through the stream so the connected client can show
             // what the app-capture path decided (shows up as "3DS: ...").
             if(soc)
+            {
                 soc->errformat((char*)"capture: app fb, vaddr=%08X progid=%08X%08X loaded=%i media=%i ns=%08X pid=%u",
                                (u32)new_captureinfo.screencapture[0].framebuf0_vaddr,
                                (u32)(progid >> 32), (u32)progid, (int)loaded,
                                (int)mediatype, (u32)nsret, (unsigned int)*procid);
+                // fb geometry — a game whose format/stride we mishandle
+                // (e.g. stereo-3D OoT) faults the capture thread here.
+                soc->errformat((char*)"capture: fb geom top fmt=%08X wbs=%u | bot fmt=%08X wbs=%u",
+                               (u32)new_captureinfo.screencapture[0].format,
+                               (unsigned int)new_captureinfo.screencapture[0].framebuf_widthbytesize,
+                               (u32)new_captureinfo.screencapture[1].format,
+                               (unsigned int)new_captureinfo.screencapture[1].framebuf_widthbytesize);
+            }
 
             if(!loaded || nsret < 0)
                 format[0] = 0xF00FCACE; //invalidate
