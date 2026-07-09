@@ -1534,15 +1534,16 @@ void newThreadMainFunction(void* __dummy_arg__)
                         if(m->hwil) dl /= 2;
                         m->dlen = dl;
                         capbuf[nxt][(dl / 4) - 1] = CAP_SENTINEL;
-                        // CRITICAL: flush the sentinel to RAM immediately.
-                        // The CPU write above leaves a DIRTY cache line; if
-                        // it wrote back AFTER the DMA it would clobber the
-                        // freshly captured pixels at the strip's end —
-                        // seen as sentinel-colored (yellow) corruption in
-                        // the strip's top-right, phantom crc changes, and
+                        // CRITICAL: clean the WHOLE buffer to RAM before the
+                        // DMA — not just the sentinel line. Any dirty
+                        // CPU-written line (the sentinel, and especially the
+                        // in-place decimation pass from when this buffer was
+                        // last processed) writes back at some arbitrary later
+                        // moment and clobbers the fresh capture: sentinel-
+                        // colored (yellow) corruption, phantom crc changes,
                         // fake torn drops.
-                        svcFlushProcessDataCache(0xFFFF8001,
-                            (u8*)&capbuf[nxt][(dl / 4) - 1], 4);
+                        svcFlushProcessDataCache(0xFFFF8001, (u8*)capbuf[nxt],
+                                                 stride[scr] * 240 * 3);
                     }
 
                     int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
@@ -1846,6 +1847,12 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // screen switch, next DMA) still advances.
                 soc->setPakSize(0);
                 st_skip++;
+                // Idle throttle: skips are so cheap the loop otherwise spins
+                // at 400+ passes/s, hammering the kernel (svcOpenProcess and
+                // a DMA against the foreground app's memory on every pass)
+                // hard enough to freeze the app. ~25 checks/s per static
+                // strip is plenty.
+                svcSleepThread(3e6);
             }
             else
             {
