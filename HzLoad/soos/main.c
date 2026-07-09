@@ -52,17 +52,20 @@ Result mcuWriteRegister(u8 reg, void* data, u32 size)
 #endif
 
 // ---------------------------------------------------------------------------
-// Top-screen software rendering. The framebuffer is rotated 90 degrees:
-// screen pixel (x,y), x in [0,400), y in [0,240) with y=0 at the top, lives
-// at byte offset ((x*240) + (239-y)) * 3, BGR order.
+// Top-screen software rendering, RGB565 (16bpp). We deliberately avoid the
+// default 24bpp BGR8 framebuffer: the streaming sysmodule's inter-process
+// DMA capture misbehaves on 3-byte pixels (black stream), and 16bpp is what
+// games typically use anyway. The framebuffer is rotated 90 degrees: screen
+// pixel (x,y), x in [0,400), y in [0,240) with y=0 at the top, lives at
+// byte offset ((x*240) + (239-y)) * 2.
 
 static inline void setpix(u8* fb, int x, int y, u8 r, u8 g, u8 b)
 {
     if(x < 0 || x >= 400 || y < 0 || y >= 240) return;
-    u32 o = ((x * 240) + (239 - y)) * 3;
-    fb[o+0] = b;
-    fb[o+1] = g;
-    fb[o+2] = r;
+    u32 o = ((x * 240) + (239 - y)) * 2;
+    u16 c = (u16)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    fb[o+0] = c & 0xFF;
+    fb[o+1] = c >> 8;
 }
 
 static void drawLine(u8* fb, int x0, int y0, int x1, int y1, u8 r, u8 g, u8 b)
@@ -129,7 +132,7 @@ static int textWidth(const char* s)
 // and strip-refresh behavior visible at a glance.
 static void drawTestPattern(u8* fb, u32 frame)
 {
-    memset(fb, 0x10, 400 * 240 * 3); // dark background
+    memset(fb, 0x00, 400 * 240 * 2); // black background
 
     float t = frame * 0.03f;
     int cx = 200, cy = 120;
@@ -223,9 +226,10 @@ int main()
     nsInit();
 
 #ifndef _HIMEM
-    // shutdown HzMod, Flurry, and the old ChirunoMod if they happen to be running
+    // Shut down HzMod and the old ChirunoMod if they happen to be running.
+    // A running Flurry is left alone so opening this app doesn't break an
+    // active stream; use [A] to restart it (e.g. after an update).
     NS_TerminateProcessTID(HZMOD_TID);
-    NS_TerminateProcessTID(FLURRY_TID);
     NS_TerminateProcessTID(CHIRUNO_TID); // old ChirunoMod (Flurry replaces it)
 #endif
 
@@ -250,14 +254,20 @@ int main()
         Result ret;
         int running;
 
+        // Launch the sysmodule. If it's already running the launch fails —
+        // treat that as "running" (if it was actually missing, toggling with
+        // [A] will surface the real launch error).
         ret = NS_LaunchTitle(titleid, 0, &pid);
-        running = (ret >= 0);
+        running = 1;
+        if(ret >= 0)
+            ret = 0;
 
 #if _HIMEM
         // HIMEM: the app is already exiting (loop above ended); launch and go.
         (void)running;
 #else
         gfxInitDefault();
+        gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES); // see setpix() comment
         consoleInit(GFX_BOTTOM, 0);
 
         // soc only for gethostid() (to display our IP); streaming sockets
