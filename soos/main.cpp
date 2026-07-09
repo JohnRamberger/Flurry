@@ -1190,8 +1190,11 @@ void newThreadMainFunction(void* __dummy_arg__)
     format[0] = capin.screencapture[0].format & 0b111;
     format[1] = capin.screencapture[1].format & 0b111;
 
-    // interlacing is disabled on 24bpp frames
-    if(cfgblk[5] && (format[scr] != 1))
+    // Hardware (DMA) interlacing: New 3DS only — the Old 3DS kernel
+    // data-aborts on gather-stride DMA configs (kernel crash, FAR=0x20).
+    // Old 3DS interlaces in software instead (see the decimation pass in
+    // the capture loop). 24bpp frames are excluded either way.
+    if(cfgblk[5] && !isold && (format[scr] != 1))
         isDmaSetForInterlaced = true;
     else
         isDmaSetForInterlaced = false;
@@ -1241,8 +1244,9 @@ void newThreadMainFunction(void* __dummy_arg__)
             format[0] = capin.screencapture[0].format & 0b111;
             format[1] = capin.screencapture[1].format & 0b111;
 
-            // interlacing is disabled on 24bpp frames
-            if(cfgblk[5] && (getFormatBpp(format[scr]) != 24))
+            // Hardware (DMA) interlacing: New 3DS only (o3DS kernel aborts
+            // on the required gather-stride config; software path below).
+            if(cfgblk[5] && !isold && (getFormatBpp(format[scr]) != 24))
                 isDmaSetForInterlaced = true;
             else
                 isDmaSetForInterlaced = false;
@@ -1310,7 +1314,9 @@ void newThreadMainFunction(void* __dummy_arg__)
                 st_t0 = svcGetSystemTick();
                 u32 c = crc32(0L, (const Bytef*)screenbuf, crclen);
                 st_crc += svcGetSystemTick() - st_t0;
-                int phase = (isStoredFrameInterlaced && interlacedRowSwitch) ? 1 : 0;
+                // Slot per interlace field so both fields of a changed strip
+                // get sent (covers hardware and software interlace alike).
+                int phase = (cfgblk[5] && interlacedRowSwitch) ? 1 : 0;
                 u32* stored = &strip_crc[phase][scr][offs[scr] & 0b111];
                 u8* age = &strip_age[phase][scr][offs[scr] & 0b111];
 
@@ -1325,6 +1331,23 @@ void newThreadMainFunction(void* __dummy_arg__)
                     *stored = c;
                     *age = 0;
                 }
+            }
+
+            // Software interlace (Old 3DS): the o3DS kernel data-aborts on
+            // the gather-stride DMA config hardware interlace needs, so keep
+            // the full-strip DMA and drop every other pixel here instead.
+            // ~0.3 ms/strip decimation buys ~half the encode cost.
+            bool softInterlaced = false;
+            if(cfgblk[5] && isold && !skipsend && getFormatBpp(format[scr]) == 16)
+            {
+                u16* px16 = (u16*)screenbuf;
+                u32 halfpx = (240 / 2) * stride[scr];
+                u32 ph = interlacedRowSwitch ? 1 : 0;
+                for(u32 i = 0; i < halfpx; i++)
+                    px16[i] = px16[i * 2 + ph];
+                scrw = 120;
+                isStoredFrameInterlaced = true;
+                softInterlaced = true;
             }
 
             if(skipsend)
@@ -1404,6 +1427,10 @@ void newThreadMainFunction(void* __dummy_arg__)
             else
             {
                 isStoredFrameInterlaced = false;
+                // Software interlace advances the field phase here, at the
+                // same pipeline point the hardware path would.
+                if(softInterlaced)
+                    interlacedRowSwitch = !interlacedRowSwitch;
             }
 
             // workaround for DMA Siz Bug (refer to docs)

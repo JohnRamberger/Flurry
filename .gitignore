@@ -10,4 +10,4 @@
 makerom.exe
 /chmod-build/
 /flurry-build/
-.idea/
+.idea/*.dmp
