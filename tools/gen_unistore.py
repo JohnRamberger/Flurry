@@ -85,7 +85,9 @@ def build(stable, nightly, revision):
             _entry(
                 "Flurry",
                 "The Flurry streaming system module plus its loader (stable release). "
-                "Install both, then launch Flurry Loader from the Home Menu.",
+                "Install both, then launch Flurry Loader from the Home Menu. "
+                "IMPORTANT: stop streaming before updating (Flurry Loader -> press A) "
+                "or the console may crash.",
                 stable,
                 False,
                 icon_index=0,
@@ -93,7 +95,9 @@ def build(stable, nightly, revision):
             _entry(
                 "Flurry (Nightly)",
                 "Bleeding-edge prerelease builds from the latest commit on main, for testers. "
-                "Install both, then launch Flurry Loader from the Home Menu.",
+                "Install both, then launch Flurry Loader from the Home Menu. "
+                "IMPORTANT: stop streaming before updating (Flurry Loader -> press A) "
+                "or the console may crash.",
                 nightly,
                 True,
                 icon_index=1,
