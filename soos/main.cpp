@@ -1321,8 +1321,16 @@ void newThreadMainFunction(void* __dummy_arg__)
 
             tryStopDma(&dmahand);
 
+            // DMA still running after the wait budget: screenbuf is TORN
+            // (new screen's pixels partially over the previous screen's).
+            // Encoding it ships mislabeled mixed content — visible as the
+            // other screen flickering through. Drop the strip instead; the
+            // next pass recaptures it. (The old fixed 5 ms sleep masked
+            // this; strip-skip + sleep 0 exposed it.)
+            bool dma_torn = (dmaState != 4 && dmaState != 0);
+
 #if DEBUG_BASIC==1
-            if(dmaState != 4 && dmaState != 0)
+            if(dma_torn)
                 printf("DMA transfer not finished, stopping manually...\ndmaState=%i\n", dmaState);
 #endif
 
@@ -1343,8 +1351,8 @@ void newThreadMainFunction(void* __dummy_arg__)
             // `scr`, strip `offs[scr]`. crc32 it (cheap; ~100µs) and skip
             // the expensive encode + send when nothing changed, unless the
             // refresh interval forces a resend.
-            bool skipsend = false;
-            if(cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
+            bool skipsend = dma_torn; // torn strips are dropped, not encoded
+            if(!dma_torn && cfgblk[6] && format[scr] != 0xF00FCACE && getFormatBpp(format[scr]) >= 16)
             {
                 u32 crclen = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
                 if(isStoredFrameInterlaced)
