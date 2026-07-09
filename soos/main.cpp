@@ -437,6 +437,8 @@ static bool isDmaSetForInterlaced = false;
 // Set while GSPGPU_ImportDisplayCaptureInfo keeps failing, so the error is
 // reported to the client once per streak instead of every iteration.
 static bool import_fail_reported = false;
+// Same, for svcStartInterProcessDma failures in the capture loop.
+static bool dmafail_reported = false;
 
 // Flurry extension state (PROTOCOL.md A.1).
 // crc32 of the last-sent content per [interlace phase][screen][strip],
@@ -1353,14 +1355,27 @@ void newThreadMainFunction(void* __dummy_arg__)
                 procid = 0;
                 format[scr] = 0xF00FCACE; //invalidate
                 dma_torn = true; // nothing valid captured this pass
+                // Every strip silently dropping here = a dead stream with
+                // no symptom; tell the client once per failure streak.
+                if(soc && !dmafail_reported)
+                {
+                    dmafail_reported = true;
+                    soc->errformat((char*)"capture: dma start failed, ret=%08X src=%08X siz=%u",
+                                   (u32)ret_dma, (u32)srcaddr, (unsigned int)siz);
+                }
             }
             else
             {
-                int dmaState = 0;
+                dmafail_reported = false;
+                int dmaState = -1;
                 for(int i = 0; i < 100; i++)
                 {
                     svcGetDmaState(&dmaState, dmahand);
-                    if(dmaState == 4 || dmaState == 0) // 4 = DMASTATE_DONE; 0 = why dude
+                    // 4 = DMASTATE_DONE. 0 also reads as done, but only
+                    // trust it after one poll interval: a just-started
+                    // transfer can report 0 before dispatch, and stopping
+                    // it then cancels the copy entirely.
+                    if(dmaState == 4 || (i > 0 && dmaState == 0))
                         break;
                     svcSleepThread(5e4); // Going higher (5e6, for example) may result in crashes.
                 }
