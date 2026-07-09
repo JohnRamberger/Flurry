@@ -1445,8 +1445,13 @@ void newThreadMainFunction(void* __dummy_arg__)
                     offs[scr] = 0;
             }
 
-            // screen switch
-            if(interlacedRowSwitch == false || cfgblk[5] == 0)
+            // screen switch. Interlace holds the screen so its second field
+            // goes out next — but only when the frame actually WAS
+            // interlaced: a screen that can't decimate (e.g. a 24bpp bottom
+            // framebuffer) never toggles the field phase, and holding on it
+            // deadlocks the loop there, starving the other screen.
+            if(interlacedRowSwitch == false || cfgblk[5] == 0
+               || !(softInterlaced || isStoredFrameInterlaced))
             {
                 if(cfgblk[3] == 1) // Top Screen Only
                     scr = 0;
