@@ -1444,7 +1444,9 @@ void newThreadMainFunction(void* __dummy_arg__)
                 u64 st_now = osGetTime();
                 if(st_now - st_epoch_ms >= 1000)
                 {
-                    const double tick2ms = 1000.0 / SYSCLOCK_ARM11;
+                    // ARM11 system tick frequency (SYSCLOCK_ARM11 in modern
+                    // libctru; not defined in the legacy 1.2.1 headers).
+                    const double tick2ms = 1000.0 / 268123480.0;
                     int stlen = sprintf((char*)(soc->bufferptr + bufsoc_pak_data_offset),
                         "sent=%lu skip=%lu\ndma=%.1f crc=%.1f enc=%.1f send=%.1f (ms/s)\nq=%u chunks=%lu",
                         (unsigned long)st_sent, (unsigned long)st_skip,
