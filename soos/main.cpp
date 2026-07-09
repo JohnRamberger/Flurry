@@ -492,6 +492,13 @@ static u64 dma_ema_ticks = 0;
 static bool torn_reported = false;
 // Rate limiter for the cellwatch diagnostic (phantom top-right cell).
 static u64 cellwatch_ms = 0;
+// Last app-capture params, persisted across capture-thread death so the
+// next client connect can report what a crashing title reported.
+static u64 g_lastapp_progid = 0;
+static u32 g_lastapp_fmt = 0;
+static u32 g_lastapp_wbs = 0;
+static u8  g_lastapp_valid = 0;
+
 // Sweep markers: set when a screen's strip index wraps, consumed by the
 // first SFRAME actually sent afterwards (pass_flags bit 0) — the client's
 // honest fps unit, robust to skipped strips.
@@ -1261,6 +1268,14 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
                                (u32)new_captureinfo.screencapture[1].format,
                                (unsigned int)new_captureinfo.screencapture[1].framebuf_widthbytesize);
             }
+            // Stash for post-crash forensics: if the capture thread faults
+            // on this app's fb (stream send lost with the dropped TCP), the
+            // next client connect re-emits these — the culprit's params
+            // survive the thread death.
+            g_lastapp_progid = progid;
+            g_lastapp_fmt = (u32)new_captureinfo.screencapture[0].format;
+            g_lastapp_wbs = (u32)new_captureinfo.screencapture[0].framebuf_widthbytesize;
+            g_lastapp_valid = 1;
 
             if(!loaded || nsret < 0)
                 format[0] = 0xF00FCACE; //invalidate
@@ -2552,6 +2567,14 @@ int main()
                     soc->bufferptr[bufsoc_pak_data_offset + 2] = 0b00000001; // features2: cell-size setting
                     soc->setPakSize(3);
                     soc->wribuf();
+
+                    // Post-crash forensics: if the prior capture thread died
+                    // on an app's fb (its telemetry lost with the TCP drop),
+                    // report the culprit's params now.
+                    if(g_lastapp_valid)
+                        soc->errformat((char*)"last app before reconnect: progid=%08X%08X fmt=%08X wbs=%u",
+                                       (u32)(g_lastapp_progid >> 32), (u32)g_lastapp_progid,
+                                       (unsigned int)g_lastapp_fmt, (unsigned int)g_lastapp_wbs);
 
                     netthread = threadCreate(newThreadMainFunction, nullptr, netfunc_thread_stack_siz, netfunc_thread_priority, netfunc_thread_cpu, true);
 
