@@ -497,6 +497,37 @@ static u64 cellwatch_ms = 0;
 // honest fps unit, robust to skipped strips.
 static u8 sweep_pending[2] = {1, 1};
 
+// Stamp a one-region v2 SFRAME (PROTOCOL.md B2) over image data ALREADY
+// sitting at bufferptr+26, and set the packet size. Single source of truth
+// for the wire layout — the three encode paths (raw rect / rect-JPEG /
+// full-strip-JPEG rewrap) all funnel through here. Consumes the sweep
+// marker for `scr`.
+static void sframe_wrap(bufsoc* s, int scr, u16 x, u16 y, u16 w, u16 h,
+                        u8 codec, u8 rflags, u32 dlen)
+{
+    u8* b = s->bufferptr;
+    b[0] = 0x90;               // SFRAME
+    b[1] = (u8)scr;
+    b[2] = (u8)(v2_seq & 0xFF);
+    b[3] = (u8)(v2_seq >> 8);
+    v2_seq++;
+    b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // pass_flags bit0
+    b[9] = 1;                  // region_count
+    b[10] = 0; b[11] = 0;      // reserved
+    u8* r = b + 12;
+    r[0] = x & 0xFF;  r[1] = x >> 8;
+    r[2] = y & 0xFF;  r[3] = y >> 8;
+    r[4] = w & 0xFF;  r[5] = w >> 8;
+    r[6] = h & 0xFF;  r[7] = h >> 8;
+    r[8] = codec;
+    r[9] = rflags;
+    r[10] = dlen & 0xFF;
+    r[11] = (dlen >> 8) & 0xFF;
+    r[12] = (dlen >> 16) & 0xFF;
+    r[13] = (dlen >> 24) & 0xFF;
+    s->setPakSize(4 + 14 + dlen);
+}
+
 // Completion sentinel: svcGetDmaState is unreliable for inter-process DMA
 // on Old 3DS (it can fail outright), and trusting a fixed settle stops slow
 // transfers mid-copy â€” torn strips (flicker) and wedged DMA channels
@@ -1802,31 +1833,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                     // buffer.
                     if(rawbytes <= 32 * 1024 && (int)(rawbytes + 26) < soc->bufsize)
                     {
-                        u8* b = soc->bufferptr;
-                        b[0] = 0x90; // SFRAME
-                        b[1] = (u8)scr;
-                        b[2] = (u8)(v2_seq & 0xFF);
-                        b[3] = (u8)(v2_seq >> 8);
-                        v2_seq++;
-                        soc->setPakSize(4 + 14 + rawbytes);
-                        b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // pass_flags bit0: first SENT frame of a sweep
-                        b[9] = 1;  // region_count
-                        b[10] = 0;
-                        b[11] = 0;
-                        u8* rh = b + 12;
-                        u16 rx = (u16)(strip_x + (u32)minr * cw);
-                        u16 ry = (u16)((cellsegs - 1 - (u32)maxs) * ch);
-                        rh[0] = rx & 0xFF; rh[1] = rx >> 8;
-                        rh[2] = ry & 0xFF; rh[3] = ry >> 8;
-                        rh[4] = w_cols & 0xFF; rh[5] = (w_cols >> 8) & 0xFF;
-                        rh[6] = h_px & 0xFF; rh[7] = (h_px >> 8) & 0xFF;
-                        rh[8] = (capbpc == 2) ? 0 : 3; // codec: raw RGB565 / raw BGR8
-                        rh[9] = 0; // progressive, full-res
-                        rh[10] = rawbytes & 0xFF;
-                        rh[11] = (rawbytes >> 8) & 0xFF;
-                        rh[12] = (rawbytes >> 16) & 0xFF;
-                        rh[13] = (rawbytes >> 24) & 0xFF;
-                        u8* dst = b + 26;
+                        u8* dst = soc->bufferptr + 26;
                         for(u32 col = 0; col < w_cols; col++)
                         {
                             const u8* src = (const u8*)screenbuf
@@ -1834,6 +1841,10 @@ void newThreadMainFunction(void* __dummy_arg__)
                             memcpy(dst, src, h_px * capbpc);
                             dst += h_px * capbpc;
                         }
+                        u16 rx = (u16)(strip_x + (u32)minr * cw);
+                        u16 ry = (u16)((cellsegs - 1 - (u32)maxs) * ch);
+                        sframe_wrap(soc, scr, rx, ry, (u16)w_cols, (u16)h_px,
+                                    (capbpc == 2) ? 0 : 3, 0, rawbytes);
                         v2raw_built = true;
                     }
                     else if(cfgblk[CFG_FORMAT] == 0)
@@ -1861,29 +1872,10 @@ void newThreadMainFunction(void* __dummy_arg__)
                                         TJSAMP_420, cfgblk[CFG_QUALITY],
                                         TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
                         {
-                            b[0] = 0x90; // SFRAME
-                            b[1] = (u8)scr;
-                            b[2] = (u8)(v2_seq & 0xFF);
-                            b[3] = (u8)(v2_seq >> 8);
-                            v2_seq++;
-                            soc->setPakSize(4 + 14 + (u32)jsz);
-                            b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // sweep marker
-                            b[9] = 1;
-                            b[10] = 0;
-                            b[11] = 0;
-                            u8* rh = b + 12;
                             u16 rx = (u16)(strip_x + (u32)minr * cw);
                             u16 ry = (u16)((cellsegs - 1 - (u32)maxs) * ch);
-                            rh[0] = rx & 0xFF; rh[1] = rx >> 8;
-                            rh[2] = ry & 0xFF; rh[3] = ry >> 8;
-                            rh[4] = w_cols & 0xFF; rh[5] = (w_cols >> 8) & 0xFF;
-                            rh[6] = h_px & 0xFF; rh[7] = (h_px >> 8) & 0xFF;
-                            rh[8] = 1; // codec: JPEG
-                            rh[9] = 0;
-                            rh[10] = jsz & 0xFF;
-                            rh[11] = (jsz >> 8) & 0xFF;
-                            rh[12] = (jsz >> 16) & 0xFF;
-                            rh[13] = (jsz >> 24) & 0xFF;
+                            sframe_wrap(soc, scr, rx, ry, (u16)w_cols, (u16)h_px,
+                                        1, 0, (u32)jsz);
                             v2raw_built = true;
                         }
                         else
@@ -2020,39 +2012,20 @@ void newThreadMainFunction(void* __dummy_arg__)
             if(cfgblk[CFG_V2] && !skipsend && !v2raw_built && cfgblk[CFG_FORMAT] == 0 && soc->getPakSize())
             {
                 u32 dlen = soc->getPakSize();
-                u8* b = soc->bufferptr;
-                memmove(b + 8 + 4 + 14, b + 8, dlen);
-                b[0] = 0x90; // SFRAME
-                b[1] = (u8)scr;
-                b[2] = (u8)(v2_seq & 0xFF);
-                b[3] = (u8)(v2_seq >> 8);
-                v2_seq++;
-                soc->setPakSize(4 + 14 + dlen);
-                b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // pass_flags bit0: first SENT frame of a sweep
-                b[9] = 1;  // region_count
-                b[10] = 0;
-                b[11] = 0;
-                u8* r = b + 12;
-                u16 rx = (u16)strip_x;
-                u16 rw = (u16)stride[scr];
-                r[0] = rx & 0xFF; r[1] = rx >> 8;
-                r[2] = 0; r[3] = 0;          // y = 0
-                r[4] = rw & 0xFF; r[5] = rw >> 8;
-                r[6] = 240; r[7] = 0;        // h = 240
-                r[8] = 1;                    // codec: JPEG
-                r[9] = 0;
+                // Move the legacy payload (at +8) to the SFRAME data offset
+                // (+26), then stamp a full-strip region over it.
+                memmove(soc->bufferptr + 26, soc->bufferptr + 8, dlen);
+                u8 rflags = 0;
                 if(frameInterlaced)
                 {
-                    r[9] |= 0b00000010;      // INTERLACED
+                    rflags |= 0b00000010;    // INTERLACED
                     if(interlacedRowSwitch)
-                        r[9] |= 0b00000001;  // FIELD_B (pre-toggle phase)
+                        rflags |= 0b00000001; // FIELD_B (pre-toggle phase)
                 }
                 if(softDownscaled)
-                    r[9] |= 0b00000100;      // DOWNSCALED (client paints 2x2)
-                r[10] = dlen & 0xFF;
-                r[11] = (dlen >> 8) & 0xFF;
-                r[12] = (dlen >> 16) & 0xFF;
-                r[13] = (dlen >> 24) & 0xFF;
+                    rflags |= 0b00000100;    // DOWNSCALED (client paints 2x2)
+                sframe_wrap(soc, scr, (u16)strip_x, 0, (u16)stride[scr], 240,
+                            1, rflags, dlen);
             }
 
             // If size is 0, don't send the packet.
