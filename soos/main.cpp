@@ -468,6 +468,10 @@ static u64 dma_ema_ticks = 0;
 static bool torn_reported = false;
 // Rate limiter for the cellwatch diagnostic (phantom top-right cell).
 static u64 cellwatch_ms = 0;
+// Sweep markers: set when a screen's strip index wraps, consumed by the
+// first SFRAME actually sent afterwards (pass_flags bit 0) — the client's
+// honest fps unit, robust to skipped strips.
+static u8 sweep_pending[2] = {1, 1};
 
 // Completion sentinel: svcGetDmaState is unreliable for inter-process DMA
 // on Old 3DS (it can fail outright), and trusting a fixed settle stops slow
@@ -1601,7 +1605,10 @@ void newThreadMainFunction(void* __dummy_arg__)
                     interlacedRowSwitch = false;
                     offs[scr]++;
                     if(offs[scr] >= limit[scr])
+                    {
                         offs[scr] = 0;
+                        sweep_pending[scr] = 1; // a new sweep begins
+                    }
                     if(cfgblk[3] == 1) // Top Screen Only
                         scr = 0;
                     else if(cfgblk[3] == 2) // Bottom Screen Only
@@ -1778,7 +1785,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                         b[3] = (u8)(v2_seq >> 8);
                         v2_seq++;
                         soc->setPakSize(4 + 14 + rawbytes);
-                        b[8] = 0;  // pass_flags
+                        b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // pass_flags bit0: first SENT frame of a sweep
                         b[9] = 1;  // region_count
                         b[10] = 0;
                         b[11] = 0;
@@ -1836,7 +1843,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                             b[3] = (u8)(v2_seq >> 8);
                             v2_seq++;
                             soc->setPakSize(4 + 14 + (u32)jsz);
-                            b[8] = 0;
+                            b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // sweep marker
                             b[9] = 1;
                             b[10] = 0;
                             b[11] = 0;
@@ -1997,7 +2004,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 b[3] = (u8)(v2_seq >> 8);
                 v2_seq++;
                 soc->setPakSize(4 + 14 + dlen);
-                b[8] = 0;  // pass_flags
+                b[8] = sweep_pending[scr]; sweep_pending[scr] = 0; // pass_flags bit0: first SENT frame of a sweep
                 b[9] = 1;  // region_count
                 b[10] = 0;
                 b[11] = 0;

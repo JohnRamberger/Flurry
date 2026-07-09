@@ -342,6 +342,10 @@ into a single send:
 - `seq` increments per pass; receiver reports (future, for UDP/rate
   control) reference it.
 - `region_count` 0 is legal (heartbeat when everything was skipped).
+- `pass_flags` bit 0: this is the first SFRAME sent since the screen's
+  strip sweep wrapped — clients count these markers as the honest
+  sweeps-per-second (fps) figure, robust to skipped strips and
+  arbitrary dirty-rect updates.
 
 ### Control (PC → 3DS)
 
