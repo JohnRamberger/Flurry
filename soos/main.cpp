@@ -112,7 +112,7 @@ void newThreadMainFunction(void*);
 inline int netfuncWaitForSettings();
 void makeTargaImage(double*,double*,int,u32*,u32*,int*,u32*,bool,bool);
 void makeJpegImage(double*,double*,int,u32*,u32*,int*,u32*,bool,bool);
-void netfuncTestFramebuffer(u32*, GSPGPU_CaptureInfo, GSPGPU_CaptureInfo);
+void netfuncTestFramebuffer(u32*, GSPGPU_CaptureInfo, GSPGPU_CaptureInfo*);
 
 
 int main(); // So you can call main from main (:
@@ -950,25 +950,29 @@ u8 getFormatBpp(u32 my_format)
 }
 
 // If framebuffers changed, do APT stuff (if necessary)
-void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSPGPU_CaptureInfo old_captureinfo)
+// NOTE: old_captureinfo must be passed by pointer — it used to be taken by
+// value, so the caller's copy never updated and "changed" re-triggered every
+// frame once an application was in the foreground, wedging the capture
+// thread in the NS retry loop below (stream froze in any app).
+void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSPGPU_CaptureInfo* old_captureinfo)
 {
     bool is_changed = false;
 
     for(int s = 0; s < 2; s++)
     {
-        if(new_captureinfo.screencapture[s].framebuf0_vaddr != old_captureinfo.screencapture[s].framebuf0_vaddr)
+        if(new_captureinfo.screencapture[s].framebuf0_vaddr != old_captureinfo->screencapture[s].framebuf0_vaddr)
         {
-            old_captureinfo.screencapture[s].framebuf0_vaddr = new_captureinfo.screencapture[s].framebuf0_vaddr;
+            old_captureinfo->screencapture[s].framebuf0_vaddr = new_captureinfo.screencapture[s].framebuf0_vaddr;
             is_changed = true;
         }
-        if(new_captureinfo.screencapture[s].framebuf_widthbytesize != old_captureinfo.screencapture[s].framebuf_widthbytesize)
+        if(new_captureinfo.screencapture[s].framebuf_widthbytesize != old_captureinfo->screencapture[s].framebuf_widthbytesize)
         {
-            old_captureinfo.screencapture[s].framebuf_widthbytesize = new_captureinfo.screencapture[s].framebuf_widthbytesize;
+            old_captureinfo->screencapture[s].framebuf_widthbytesize = new_captureinfo.screencapture[s].framebuf_widthbytesize;
             is_changed = true;
         }
-        if(new_captureinfo.screencapture[s].format != old_captureinfo.screencapture[s].format)
+        if(new_captureinfo.screencapture[s].format != old_captureinfo->screencapture[s].format)
         {
-            old_captureinfo.screencapture[s].format = new_captureinfo.screencapture[s].format;
+            old_captureinfo->screencapture[s].format = new_captureinfo.screencapture[s].format;
             is_changed = true;
         }
     }
@@ -999,8 +1003,13 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
             u64 progid = -1ULL;
             bool loaded = false;
             u8 mediatype = 0;
+            Result nsret = 0;
 
-            while(1)
+            // Bounded (~0.5 s of attempts): giving up and streaming nothing
+            // beats wedging the capture thread forever. With old_captureinfo
+            // updated properly this runs once per framebuffer change, not
+            // every frame.
+            for(int tries = 0; tries < 32; tries++)
             {
                 // loaded = Registration Status(?) of the specified application.
                 loaded = false;
@@ -1021,10 +1030,20 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
                 // see: https://github.com/ChainSwordCS/ChirunoMod/issues/11
                 //if(mediatype == 2)
                 //    progid = 0; // Game Card
-                if(NS_LaunchTitle(progid, 0, procid) >= 0)
+                nsret = NS_LaunchTitle(progid, 0, procid);
+                if(nsret >= 0)
                     break;
+                svcSleepThread(15e6);
             }
-            if(!loaded)
+
+            // Telemetry through the stream so the connected client can show
+            // what the app-capture path decided (shows up as "3DS: ...").
+            if(soc)
+                soc->errformat((char*)"capture: app fb, progid=%08X%08X loaded=%i media=%i ns=%08X pid=%u",
+                               (u32)(progid >> 32), (u32)progid, (int)loaded,
+                               (int)mediatype, (u32)nsret, (unsigned int)*procid);
+
+            if(!loaded || nsret < 0)
                 format[0] = 0xF00FCACE; //invalidate
             PatStay(0x00FF00); // Notif LED = Green
         }
@@ -1150,7 +1169,7 @@ void newThreadMainFunction(void* __dummy_arg__)
 
         if(GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
         {
-            netfuncTestFramebuffer(&procid,capin,oldcapin);
+            netfuncTestFramebuffer(&procid,capin,&oldcapin);
 
             format[0] = capin.screencapture[0].format & 0b111;
             format[1] = capin.screencapture[1].format & 0b111;
