@@ -717,6 +717,10 @@ int netfuncWaitForSettings()
                     cfgblk[11] = j?1:0;
                     return 1;
 
+                case 0x0C: // Flurry extension: 1 Hz perf stats on/off (bool)
+                    cfgblk[12] = j?1:0;
+                    return 1;
+
                 default:
                     // Invalid subtype for "Settings" packet-type
                     return 1;
@@ -1217,13 +1221,33 @@ void newThreadMainFunction(void* __dummy_arg__)
     updateDmaCfgBpp(dma_config[0], getFormatBpp(format[0]), cfgblk[5], capin.screencapture[0].framebuf_widthbytesize);
     updateDmaCfgBpp(dma_config[1], getFormatBpp(format[1]), cfgblk[5], capin.screencapture[1].framebuf_widthbytesize);
 
+    // Housekeeping (settings poll, GSP capture-info import, DMA cfg) is
+    // throttled: each is a service IPC and doing them per strip was a large
+    // fixed cost per iteration (~30 ms/strip measured, pixel-independent).
+    // 50 ms keeps app-switch/settings latency invisible. Same reason the
+    // LED PatStay (mcu IPC) left the loop: set once, restored by any path
+    // that changes it.
+    PatStay(0x00FF00); // Notif LED = Green
+
+    u64 last_housekeep_ms = 0;
+    Result impret = -1;
+
     // Infinite loop unless it crashes or is halted by another application.
     while(threadrunning)
     {
-        PatStay(0x00FF00); // Notif LED = Green
-
         if(!soc) break;
-        while(soc->avail())
+
+        bool housekeep = false;
+        {
+            u64 now_hk = osGetTime();
+            if(now_hk - last_housekeep_ms >= 50)
+            {
+                housekeep = true;
+                last_housekeep_ms = now_hk;
+            }
+        }
+
+        while(housekeep && soc->avail())
         { // ?
 
             int ret_nwfs = netfuncWaitForSettings();
@@ -1250,9 +1274,12 @@ void newThreadMainFunction(void* __dummy_arg__)
         sendDebugFrametimeStats(timems_processframe,timems_writetosocbuf,&timems_dmaasync,timems_formatconvert);
 #endif
 
-        Result impret = GSPGPU_ImportDisplayCaptureInfo(&capin);
+        if(housekeep)
+            impret = GSPGPU_ImportDisplayCaptureInfo(&capin);
         if(impret >= 0)
         {
+            if(housekeep)
+            {
             import_fail_reported = false;
             netfuncTestFramebuffer(&procid,capin,&oldcapin);
 
@@ -1278,6 +1305,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                 updateDmaCfgBpp(dma_config[0], getFormatBpp(format[0]), isDmaSetForInterlaced?1:0, capin.screencapture[0].framebuf_widthbytesize);
                 updateDmaCfgBpp(dma_config[1], getFormatBpp(format[1]), isDmaSetForInterlaced?1:0, capin.screencapture[1].framebuf_widthbytesize);
                 break;
+            }
             }
 
             int dmaState = 0;
@@ -1518,7 +1546,7 @@ void newThreadMainFunction(void* __dummy_arg__)
             // is free to reuse.
             {
                 u64 st_now = osGetTime();
-                if(st_now - st_epoch_ms >= 1000)
+                if(cfgblk[12] && st_now - st_epoch_ms >= 1000)
                 {
                     // ARM11 system tick frequency (SYSCLOCK_ARM11 in modern
                     // libctru; not defined in the legacy 1.2.1 headers).
@@ -1541,6 +1569,17 @@ void newThreadMainFunction(void* __dummy_arg__)
                     st_dma = st_crc = st_enc = st_send = 0;
                     st_sent = st_skip = 0;
                     st_epoch_ms = st_now;
+                }
+                else if(!cfgblk[12])
+                {
+                    // Stats disabled: keep the window fresh so counters
+                    // don't accumulate stale history until re-enabled.
+                    if(st_now - st_epoch_ms >= 1000)
+                    {
+                        st_dma = st_crc = st_enc = st_send = 0;
+                        st_sent = st_skip = 0;
+                        st_epoch_ms = st_now;
+                    }
                 }
             }
 
@@ -1901,7 +1940,7 @@ int main()
                     soc->setPakSubtype(0x04);
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
-                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b00111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale
+                    soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b01111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale | stats-toggle
                     soc->setPakSize(2);
                     soc->wribuf();
 
