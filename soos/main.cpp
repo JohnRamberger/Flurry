@@ -464,6 +464,8 @@ typedef struct
 
 // EMA of measured transfer durations in system ticks (0 = unknown yet).
 static u64 dma_ema_ticks = 0;
+// Once-per-streak reporter for torn (sentinel-timeout) captures.
+static bool torn_reported = false;
 
 // Completion sentinel: svcGetDmaState is unreliable for inter-process DMA
 // on Old 3DS (it can fail outright), and trusting a fixed settle stops slow
@@ -770,12 +772,19 @@ int netfuncWaitForSettings()
                     cfgblk[15] = j?1:0;
                     return 1;
 
-                case 0x10: // Flurry extension: dirty-cell size preset
-                           // (0 = 10x60, 1 = fine 5x30, 2 = coarse 25x120)
-                    if(j <= 2 && cfgblk[16] != j)
+                case 0x10: // Flurry extension: dirty-grid columns per screen (4/8/16)
+                    if((j == 4 || j == 8 || j == 16) && cfgblk[16] != j)
                     {
                         cfgblk[16] = j;
                         // Geometry changed: all stored cell crcs are stale.
+                        memset(cell_crc, 0, sizeof(cell_crc));
+                    }
+                    return 1;
+
+                case 0x11: // Flurry extension: dirty-grid rows per screen (1/2/4/8)
+                    if((j == 1 || j == 2 || j == 4 || j == 8) && cfgblk[17] != j)
+                    {
+                        cfgblk[17] = j;
                         memset(cell_crc, 0, sizeof(cell_crc));
                     }
                     return 1;
@@ -1234,6 +1243,15 @@ void newThreadMainFunction(void* __dummy_arg__)
     memset(strip_crc, 0, sizeof(strip_crc));
     memset(strip_age, 0, sizeof(strip_age));
     memset(cell_crc, 0, sizeof(cell_crc));
+    // Stagger refresh ages: seeded equal, every strip crosses the refresh
+    // threshold on the same pass and the burst of forced full-strip resends
+    // (~100-200 ms of CPU + memory bus) visibly hitches the foreground app
+    // on a periodic beat. Distinct seeds phase-shift each strip's refresh
+    // permanently.
+    for(int p2 = 0; p2 < 2; p2++)
+        for(int s2 = 0; s2 < 2; s2++)
+            for(int i2 = 0; i2 < 8; i2++)
+                strip_age[p2][s2][i2] = (u8)((i2 * 13 + s2 * 29 + p2 * 7) & 63);
     pace_last = 0;
     last_route = 0;
     import_fail_reported = false;
@@ -1449,7 +1467,21 @@ void newThreadMainFunction(void* __dummy_arg__)
                     // value â€” vanishingly rare): dropped, recaptured on the
                     // next scheduler pass.
                     st_torn++;
+                    // Identify the tearing pattern (screen/format tells us
+                    // whether e.g. 24bpp destinations never write the last
+                    // word); once per streak.
+                    if(soc && !torn_reported)
+                    {
+                        torn_reported = true;
+                        soc->errformat((char*)"capture: torn scr=%u strip=%u fmt=%u dlen=%u",
+                                       (unsigned int)cmeta[cap_pending].scr,
+                                       (unsigned int)cmeta[cap_pending].strip,
+                                       (unsigned int)cmeta[cap_pending].fmt,
+                                       (unsigned int)cmeta[cap_pending].dlen);
+                    }
                 }
+                if(have_ready)
+                    torn_reported = false;
                 cap_pending = -1;
             }
 
@@ -1605,14 +1637,18 @@ void newThreadMainFunction(void* __dummy_arg__)
             // ---- Stage 3: dirty-cell grid (v2 + skip, 16bpp, full-res). ----
             // Replaces the strip-level crc below when active. Runs on the
             // pre-decimation capture, so static content skips regardless of
-            // the interlace/quarter sample phase. Cell geometry from the
-            // client preset (cfgblk[16]).
-            u32 cw = 10, ch = 60;
-            if(cfgblk[16] == 1) { cw = 5;  ch = 30;  }
-            if(cfgblk[16] == 2) { cw = 25; ch = 120; }
+            // the interlace/quarter sample phase. Grid geometry is client
+            // set per SCREEN: cfgblk[16] columns (4/8/16), cfgblk[17] rows
+            // (1/2/4/8; rows multiply crc call count, columns are free).
+            u32 gcols = cfgblk[16];
+            if(gcols != 4 && gcols != 8 && gcols != 16) gcols = 16;
+            u32 grows = cfgblk[17];
+            if(grows != 1 && grows != 2 && grows != 4 && grows != 8) grows = 1;
+            u32 cw = ((scr == 0) ? 400 : 320) / gcols;
+            u32 ch = 240 / grows;
             bool v2cells = cfgblk[15] && cfgblk[6] && !dma_torn && !hwInterlaced
                 && getFormatBpp(format[scr]) == 16
-                && (stride[scr] % cw == 0) && (stride[scr] / cw) <= 20;
+                && cw > 0 && (stride[scr] % cw == 0) && (stride[scr] / cw) <= 20;
             bool v2raw_built = false;
             if(v2cells)
             {
@@ -1952,6 +1988,10 @@ void newThreadMainFunction(void* __dummy_arg__)
                 memset(strip_crc, 0, sizeof(strip_crc));
                 memset(strip_age, 0, sizeof(strip_age));
                 memset(cell_crc, 0, sizeof(cell_crc));
+                for(int p2 = 0; p2 < 2; p2++)
+                    for(int s2 = 0; s2 < 2; s2++)
+                        for(int i2 = 0; i2 < 8; i2++)
+                            strip_age[p2][s2][i2] = (u8)((i2 * 13 + s2 * 29 + p2 * 7) & 63);
                 if(soc)
                     soc->errformat((char*)"chunks: now %u per screen", (unsigned int)limit[0]);
             }
@@ -2069,6 +2109,9 @@ int main()
     cfgblk[3] = 1;  // top screen
     cfgblk[7] = 64; // strip-skip refresh interval (frames)
     cfgblk[10] = 5; // per-strip sleep ms (legacy Old-3DS pacing floor)
+    cfgblk[16] = 16; // dirty-grid columns per screen
+    cfgblk[17] = 1;  // dirty-grid rows (1 = full-height columns: row cuts
+                     // multiply crc calls, column cuts are free)
 
     u32 soc_service_buf_siz = 0;
     u32 screenbuf_siz = 0;
