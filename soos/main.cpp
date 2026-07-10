@@ -1782,8 +1782,18 @@ void newThreadMainFunction(void* __dummy_arg__)
                     if(cfgblk[CFG_CAPTURE] == 1 && prochand)
                     {
                         u32 fbva = (u32)capin.screencapture[scr].framebuf0_vaddr;
-                        MemInfo mi; PageInfo pi;
-                        if(R_SUCCEEDED(svcQueryProcessMemory(&mi, &pi, prochand, fbva))
+                        MemInfo mi = {0}; PageInfo pi = {0};
+                        Result qrc = svcQueryProcessMemory(&mi, &pi, prochand, fbva);
+                        // One-shot diag so we can see WHY the map path is (or
+                        // isn't) taken: query rc + resolved region geometry.
+                        static bool csvc_diag = false;
+                        if(soc && !csvc_diag)
+                        {
+                            csvc_diag = true;
+                            soc->errformat((char*)"csvc diag: qrc=%08X base=%08X siz=%08X fbva=%08X ph=%08X",
+                                           (u32)qrc, (u32)mi.base_addr, (u32)mi.size, (u32)fbva, (u32)prochand);
+                        }
+                        if(R_SUCCEEDED(qrc)
                            && mi.size > 0 && mi.size <= 0x1000000) // ≤16MB sanity
                         {
                             // Double-buffer flips stay in the same region → no
