@@ -1800,15 +1800,20 @@ void newThreadMainFunction(void* __dummy_arg__)
                             soc->errformat((char*)"csvc diag: qrc=%08X base=%08X siz=%08X fbva=%08X ph=%08X",
                                            (u32)qrc, (u32)mi.base_addr, (u32)mi.size, (u32)fbva, (u32)prochand);
                         }
-                        // Games hand back the whole linear-heap block as one
-                        // region (OoT: 32MB @ 14000000). Luma requires the map
-                        // be whole-region + same-address, so allow up to 32MB.
-                        if(R_SUCCEEDED(qrc)
-                           && mi.size > 0 && mi.size <= 0x2000000) // ≤32MB sanity
+                        // Mapping the WHOLE 32MB live heap crashed OoT after a
+                        // few frames: prefetch abort, PC=60000010 (corrupted
+                        // ctrl flow), title 33500 — a race between our per-frame
+                        // reads and OoT's use of its heap. Map only a small
+                        // fb-sized window from the heap base instead (OoT's fb
+                        // double-buffers sit in the first ~0x8D000). Smaller map
+                        // = far less TLB/cache surface. If Luma requires a whole
+                        // -region map it returns a clean error we log (no crash).
+                        u32 mapsiz = mi.size < 0x200000 ? mi.size : 0x200000; // ≤2MB window
+                        if(R_SUCCEEDED(qrc) && mi.size > 0)
                         {
-                            // Double-buffer flips stay in the same region → no
-                            // remap; remap only when base/size changes.
-                            if(g_mapped_base && (g_mapped_base != mi.base_addr || g_mapped_size != mi.size))
+                            // Remap only when the region base changes (buffer
+                            // flips within the window keep the same base).
+                            if(g_mapped_base && g_mapped_base != mi.base_addr)
                             {
                                 svcUnmapProcessMemoryEx(0xFFFF8001, g_mapped_base, g_mapped_size);
                                 g_mapped_base = 0;
@@ -1817,30 +1822,33 @@ void newThreadMainFunction(void* __dummy_arg__)
                             {
                                 // flags=0 (SHARED). MAPEXFLAGS_PRIVATE=BIT(0)
                                 // rewrites the region's memory state to PRIVATE
-                                // (0xBB05), which changed the cache/shareability
-                                // attributes on OoT's LIVE heap and broke its
-                                // LDREX/STREX exclusive monitor -> OoT crashed
-                                // in an atomic spinlock (dump: title 33500, pc
-                                // in an ldrex/strex/cmp/bne loop). SHARED keeps
-                                // the original state (0x5806) intact.
+                                // (0xBB05) -> broke OoT's LDREX/STREX monitor.
+                                // SHARED keeps the original state (0x5806).
                                 Result mr = svcMapProcessMemoryEx(0xFFFF8001, mi.base_addr,
-                                                                  prochand, mi.base_addr, mi.size, 0);
+                                                                  prochand, mi.base_addr, mapsiz, 0);
                                 if(R_SUCCEEDED(mr))
                                 {
                                     g_mapped_base = mi.base_addr;
-                                    g_mapped_size = mi.size;
+                                    g_mapped_size = mapsiz;
                                     if(soc)
                                         soc->errformat((char*)"csvc map OK: base=%08X siz=%08X fbva=%08X",
-                                                       (u32)mi.base_addr, (u32)mi.size, (u32)fbva);
+                                                       (u32)mi.base_addr, (u32)mapsiz, (u32)fbva);
                                 }
                                 else if(soc && !mapfail_reported)
                                 {
                                     mapfail_reported = true;
                                     soc->errformat((char*)"csvc map FAILED: base=%08X siz=%08X ret=%08X",
-                                                   (u32)mi.base_addr, (u32)mi.size, (u32)mr);
+                                                   (u32)mi.base_addr, (u32)mapsiz, (u32)mr);
                                 }
                             }
-                            if(g_mapped_base)
+                            // Only redirect the DMA if the whole fb strip falls
+                            // inside the mapped window; a buffer past the window
+                            // would read unmapped memory. Otherwise leave the
+                            // normal DMA path (which fails D9000402 on retail).
+                            u32 strip_end = fbva + (region_siz * (offs[scr] + 1));
+                            if(g_mapped_base
+                               && fbva >= g_mapped_base
+                               && strip_end <= g_mapped_base + g_mapped_size)
                             {
                                 // fb now readable at fbva in our space.
                                 srcaddr = (u8*)fbva + (region_siz * offs[scr]);
