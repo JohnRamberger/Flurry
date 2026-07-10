@@ -1793,8 +1793,11 @@ void newThreadMainFunction(void* __dummy_arg__)
                             soc->errformat((char*)"csvc diag: qrc=%08X base=%08X siz=%08X fbva=%08X ph=%08X",
                                            (u32)qrc, (u32)mi.base_addr, (u32)mi.size, (u32)fbva, (u32)prochand);
                         }
+                        // Games hand back the whole linear-heap block as one
+                        // region (OoT: 32MB @ 14000000). Luma requires the map
+                        // be whole-region + same-address, so allow up to 32MB.
                         if(R_SUCCEEDED(qrc)
-                           && mi.size > 0 && mi.size <= 0x1000000) // ≤16MB sanity
+                           && mi.size > 0 && mi.size <= 0x2000000) // ≤32MB sanity
                         {
                             // Double-buffer flips stay in the same region → no
                             // remap; remap only when base/size changes.
