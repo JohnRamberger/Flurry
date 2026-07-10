@@ -1727,25 +1727,43 @@ void newThreadMainFunction(void* __dummy_arg__)
                     }
 
                     // Capture backend (Flurry extension, setting 0x12):
-                    //   0 = inter-process DMA (works for homebrew/applets;
-                    //       retail games deny it, D9000402)
-                    //   1 = GPU display-transfer (experimental, for capturing
-                    //       protected retail game framebuffers) — TODO: issue
-                    //       GX_DisplayTransfer from the active fb into capbuf.
-                    //       Until implemented, log once and use DMA so the
-                    //       toggle is safe.
-                    int ret_dma;
+                    //   0 = inter-process DMA of the game's framebuffer via
+                    //       its process handle. Works for homebrew/applets;
+                    //       retail games deny it (D9000402).
+                    //   1 = PDC direct read. The display controller registers
+                    //       (mapped GPU IO at 0x1EF00400/0x500) hold the
+                    //       PHYSICAL VRAM address the LCD is scanning out —
+                    //       for ANY foreground process, since the PDC/DMA
+                    //       work on physical memory with no per-process check.
+                    //       VRAM is mapped to us (phys 0x18000000 = virtual
+                    //       0x1F000000), so we DMA from it with our own handle
+                    //       (0xFFFF8001) — no game process handle, no
+                    //       D9000402. Captures retail games.
                     if(cfgblk[CFG_CAPTURE] == 1)
                     {
-                        static bool gpu_todo_reported = false;
-                        if(soc && !gpu_todo_reported)
+                        u32 rb = (scr == 0) ? 0x1EF00400 : 0x1EF00500;
+                        u32 sel = *(volatile u32*)(rb + 0x78);
+                        // bit 0 = next fb after VBlank; the one on screen now
+                        // is the other → A-first (0x68) / A-second (0x6C).
+                        u32 phys = *(volatile u32*)(rb + ((sel & 1) ? 0x6C : 0x68));
+                        if(phys && phys < 0x18000000) phys <<= 3; // some regs store addr>>3
+                        if(phys >= 0x18000000 && phys < 0x18600000)
                         {
-                            gpu_todo_reported = true;
-                            soc->errformat((char*)"capture: GPU-transfer backend not implemented yet, using DMA");
+                            // Same strip offset as the DMA path; the scanout
+                            // fb shares the 240-tall-column geometry.
+                            srcaddr = (u8*)(0x1F000000 + (phys - 0x18000000))
+                                    + (region_siz * offs[scr]);
+                            srcprochand = 0xFFFF8001; // our own VRAM mapping
+                            format[scr] = (*(volatile u32*)(rb + 0x70)) & 0b111;
+                            m->fmt = (u8)format[scr];
                         }
-                        // fall through to DMA for now
+                        else if(soc && !dmafail_reported)
+                        {
+                            dmafail_reported = true;
+                            soc->errformat((char*)"capture: PDC fb addr out of VRAM (%08X), using DMA", (u32)phys);
+                        }
                     }
-                    ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
+                    int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
                     if(ret_dma < 0)
                     {
                         procid = 0;
