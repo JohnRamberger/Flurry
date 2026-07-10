@@ -1200,6 +1200,18 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
         g_lastapp_vaddr = fbva;
         g_lastapp_valid = 1;
 
+        // Also to the SD log (Flurry.log): a title that FULLY crashes the
+        // module (flashing-yellow, no reconnect) can't re-emit over the
+        // stream, but the file survives — read its last lines after.
+#if DEBUG_BASIC==1
+        printf("fbchange vaddr=%08X top fmt=%08X wbs=%u | bot fmt=%08X wbs=%u\n",
+               (unsigned int)fbva,
+               (unsigned int)new_captureinfo.screencapture[0].format,
+               (unsigned int)new_captureinfo.screencapture[0].framebuf_widthbytesize,
+               (unsigned int)new_captureinfo.screencapture[1].format,
+               (unsigned int)new_captureinfo.screencapture[1].framebuf_widthbytesize);
+#endif
+
         // Real VRAM only: 0x1F000000-0x1F5FFFFF (retail applets render
         // there). Application linear heap lives at 0x30000000+ for
         // commercial titles and 0x14000000+ for libctru homebrew. The old
