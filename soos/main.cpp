@@ -1737,6 +1737,13 @@ void newThreadMainFunction(void* __dummy_arg__)
                     if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
                     u32 srcprochand = prochand ? prochand : 0xFFFF8001;
                     u8* srcaddr = (u8*)capin.screencapture[scr].framebuf0_vaddr + (region_siz * offs[scr]);
+                    // Mode-1 (game-fb map) reads via CPU memcpy instead of the
+                    // inter-process DMA: the kernel's DMA setup does cache
+                    // maintenance on the SOURCE pages, which are OoT's live heap
+                    // — the suspected trigger for OoT's crash. CPU read has no
+                    // such kernel op. Set only for the simple 16bpp-progressive
+                    // path (no gather / no decimation).
+                    bool cpu_capture = false;
 
                     u32 siz2 = (getFormatBpp(format[scr]) / 8) * 240 * stride[scr];
                     if(m->hwil)
@@ -1854,9 +1861,34 @@ void newThreadMainFunction(void* __dummy_arg__)
                                 srcaddr = (u8*)fbva + (region_siz * offs[scr]);
                                 srcprochand = 0xFFFF8001;
                                 m->fmt = (u8)(format[scr] & 0b111);
+                                if(!m->hwil && getFormatBpp(format[scr]) == 16)
+                                    cpu_capture = true;
                             }
                         }
                     }
+                    if(cpu_capture)
+                    {
+                        // CPU read the mapped game fb (no kernel DMA source
+                        // cache-op). Copy dlen bytes (16bpp => src == dst len),
+                        // then flush capbuf to RAM so the processing side's
+                        // invalidate re-reads our copy, not stale cache. The
+                        // real pixels overwrite the planted sentinel => the wait
+                        // loop sees "done" immediately.
+                        memcpy(capbuf[nxt], srcaddr, m->dlen);
+                        svcFlushProcessDataCache(0xFFFF8001, (u8*)capbuf[nxt], m->dlen);
+                        dmahand = 0; // no DMA in flight; tryStopDma noops
+                        dmafail_reported = false;
+                        m->valid = 1;
+                        m->t_start = svcGetSystemTick();
+                        cap_pending = nxt;
+                        // Heartbeat: prove how many frames survive before any
+                        // crash (gated coarse so it doesn't spam).
+                        static u32 cpu_frames = 0;
+                        if(soc && (++cpu_frames % 120) == 0)
+                            soc->errformat((char*)"cpu capture alive: frame=%u", (unsigned int)cpu_frames);
+                    }
+                    else
+                    {
                     int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
                     if(ret_dma < 0)
                     {
@@ -1882,6 +1914,7 @@ void newThreadMainFunction(void* __dummy_arg__)
                         m->valid = 1;
                         m->t_start = svcGetSystemTick();
                         cap_pending = nxt;
+                    }
                     }
 
                     if(prochand)
