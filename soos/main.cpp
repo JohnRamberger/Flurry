@@ -1808,8 +1808,16 @@ void newThreadMainFunction(void* __dummy_arg__)
                             }
                             if(!g_mapped_base)
                             {
+                                // flags=0 (SHARED). MAPEXFLAGS_PRIVATE=BIT(0)
+                                // rewrites the region's memory state to PRIVATE
+                                // (0xBB05), which changed the cache/shareability
+                                // attributes on OoT's LIVE heap and broke its
+                                // LDREX/STREX exclusive monitor -> OoT crashed
+                                // in an atomic spinlock (dump: title 33500, pc
+                                // in an ldrex/strex/cmp/bne loop). SHARED keeps
+                                // the original state (0x5806) intact.
                                 Result mr = svcMapProcessMemoryEx(0xFFFF8001, mi.base_addr,
-                                                                  prochand, mi.base_addr, mi.size, 1);
+                                                                  prochand, mi.base_addr, mi.size, 0);
                                 if(R_SUCCEEDED(mr))
                                 {
                                     g_mapped_base = mi.base_addr;
