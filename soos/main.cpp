@@ -506,6 +506,11 @@ static bool isDmaSetForInterlaced = false;
 static bool import_fail_reported = false;
 // Same, for svcStartInterProcessDma failures in the capture loop.
 static bool dmafail_reported = false;
+// Capture mode 1 (Luma custom-SVC game-fb map): cached mapping so we don't
+// remap every frame; latch for the map-failure log.
+static u32 g_mapped_base = 0;
+static u32 g_mapped_size = 0;
+static bool mapfail_reported = false;
 // Protocol v2: SFRAME sequence number, increments per sent pass.
 static u16 v2_seq = 0;
 
@@ -1765,61 +1770,55 @@ void newThreadMainFunction(void* __dummy_arg__)
                     }
 
                     // Capture backend (Flurry extension, setting 0x12):
-                    //   0 = inter-process DMA of the game's framebuffer via
-                    //       its process handle. Works for homebrew/applets;
-                    //       retail games deny it (D9000402).
-                    //   1 = PDC direct read. The display controller registers
-                    //       (mapped GPU IO at 0x1EF00400/0x500) hold the
-                    //       PHYSICAL VRAM address the LCD is scanning out —
-                    //       for ANY foreground process, since the PDC/DMA
-                    //       work on physical memory with no per-process check.
-                    //       VRAM is mapped to us (phys 0x18000000 = virtual
-                    //       0x1F000000), so we DMA from it with our own handle
-                    //       (0xFFFF8001) — no game process handle, no
-                    //       D9000402. Captures retail games.
-                    if(cfgblk[CFG_CAPTURE] == 1)
+                    //   0 = inter-process DMA of the game's fb via its process
+                    //       handle. Homebrew/applets OK; retail games deny it
+                    //       (D9000402).
+                    //   1 = map the game's fb region into OUR address space via
+                    //       Luma's custom svcMapProcessMemoryEx, then read it
+                    //       directly (no inter-process DMA → no D9000402).
+                    //       Confirmed: Luma permits custom SVCs for us
+                    //       (svcConvertVAToPA(VRAM)=0x18000000). The region
+                    //       must be mapped whole, to the same address.
+                    if(cfgblk[CFG_CAPTURE] == 1 && prochand)
                     {
-                        // Probe once whether Luma lets us call custom SVCs:
-                        // convert a known-mapped VA (VRAM) to its physical.
-                        // ~0x18000000 back = custom SVCs work → the game-fb
-                        // map path is viable. An error/garbage = Luma blocks
-                        // this process → game capture needs a 3GX plugin.
-                        static bool csvc_probed = false;
-                        if(!csvc_probed && soc)
+                        u32 fbva = (u32)capin.screencapture[scr].framebuf0_vaddr;
+                        MemInfo mi; PageInfo pi;
+                        if(R_SUCCEEDED(svcQueryProcessMemory(&mi, &pi, prochand, fbva))
+                           && mi.size > 0 && mi.size <= 0x1000000) // ≤16MB sanity
                         {
-                            csvc_probed = true;
-                            u32 pa = svcConvertVAToPA((const void*)0x1F000000, false);
-                            soc->errformat((char*)"csvc probe: VAToPA(1F000000)=%08X (expect ~18000000)", (u32)pa);
-                        }
-
-                        u32 rb = (scr == 0) ? 0x1EF00400 : 0x1EF00500;
-                        u32 sel = *(volatile u32*)(rb + 0x78);
-                        // bit 0 = next fb after VBlank; the one on screen now
-                        // is the other → A-first (0x68) / A-second (0x6C).
-                        u32 phys = *(volatile u32*)(rb + ((sel & 1) ? 0x6C : 0x68));
-                        if(phys && phys < 0x18000000) phys <<= 3; // some regs store addr>>3
-                        // Resolve the physical scanout addr to a pointer we
-                        // can read: VRAM is mapped at 0x1F000000; FCRAM (where
-                        // o3DS actually scans out from, 0x20000000+) is now
-                        // identity-mapped read-only via cia.rsf.
-                        u8* mapped = nullptr;
-                        if(phys >= 0x18000000 && phys < 0x18600000)
-                            mapped = (u8*)(0x1F000000 + (phys - 0x18000000));
-                        else if(phys >= 0x20000000 && phys < 0x28000000)
-                            mapped = (u8*)phys; // FCRAM identity mapping
-                        if(mapped)
-                        {
-                            // Same strip offset as the DMA path; the scanout
-                            // fb shares the 240-tall-column geometry.
-                            srcaddr = mapped + (region_siz * offs[scr]);
-                            srcprochand = 0xFFFF8001; // our own mapping, no game handle
-                            format[scr] = (*(volatile u32*)(rb + 0x70)) & 0b111;
-                            m->fmt = (u8)format[scr];
-                        }
-                        else if(soc && !dmafail_reported)
-                        {
-                            dmafail_reported = true;
-                            soc->errformat((char*)"capture: PDC fb addr unmapped (%08X), using DMA", (u32)phys);
+                            // Double-buffer flips stay in the same region → no
+                            // remap; remap only when base/size changes.
+                            if(g_mapped_base && (g_mapped_base != mi.base_addr || g_mapped_size != mi.size))
+                            {
+                                svcUnmapProcessMemoryEx(0xFFFF8001, g_mapped_base, g_mapped_size);
+                                g_mapped_base = 0;
+                            }
+                            if(!g_mapped_base)
+                            {
+                                Result mr = svcMapProcessMemoryEx(0xFFFF8001, mi.base_addr,
+                                                                  prochand, mi.base_addr, mi.size, 1);
+                                if(R_SUCCEEDED(mr))
+                                {
+                                    g_mapped_base = mi.base_addr;
+                                    g_mapped_size = mi.size;
+                                    if(soc)
+                                        soc->errformat((char*)"csvc map OK: base=%08X siz=%08X fbva=%08X",
+                                                       (u32)mi.base_addr, (u32)mi.size, (u32)fbva);
+                                }
+                                else if(soc && !mapfail_reported)
+                                {
+                                    mapfail_reported = true;
+                                    soc->errformat((char*)"csvc map FAILED: base=%08X siz=%08X ret=%08X",
+                                                   (u32)mi.base_addr, (u32)mi.size, (u32)mr);
+                                }
+                            }
+                            if(g_mapped_base)
+                            {
+                                // fb now readable at fbva in our space.
+                                srcaddr = (u8*)fbva + (region_siz * offs[scr]);
+                                srcprochand = 0xFFFF8001;
+                                m->fmt = (u8)(format[scr] & 0b111);
+                            }
                         }
                     }
                     int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
