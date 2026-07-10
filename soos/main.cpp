@@ -1779,7 +1779,14 @@ void newThreadMainFunction(void* __dummy_arg__)
                     //       Confirmed: Luma permits custom SVCs for us
                     //       (svcConvertVAToPA(VRAM)=0x18000000). The region
                     //       must be mapped whole, to the same address.
-                    if(cfgblk[CFG_CAPTURE] == 1 && prochand)
+                    // fbva >= 0x1F000000 = the fb already lives in VRAM, which
+                    // we have mapped (rsf 1f000000-1f5fffff). Those DMA fine with
+                    // our own handle already (the "vram fb" path); mapping them
+                    // again fails E0A01BF5 (region occupied) and cascades to a
+                    // reconnect. Only cross-process-map game-PRIVATE fbs (the
+                    // 0x14000000 linear range).
+                    if(cfgblk[CFG_CAPTURE] == 1 && prochand
+                       && (u32)capin.screencapture[scr].framebuf0_vaddr < 0x1F000000)
                     {
                         u32 fbva = (u32)capin.screencapture[scr].framebuf0_vaddr;
                         MemInfo mi = {0}; PageInfo pi = {0};
