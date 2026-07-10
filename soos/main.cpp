@@ -1747,20 +1747,28 @@ void newThreadMainFunction(void* __dummy_arg__)
                         // is the other → A-first (0x68) / A-second (0x6C).
                         u32 phys = *(volatile u32*)(rb + ((sel & 1) ? 0x6C : 0x68));
                         if(phys && phys < 0x18000000) phys <<= 3; // some regs store addr>>3
+                        // Resolve the physical scanout addr to a pointer we
+                        // can read: VRAM is mapped at 0x1F000000; FCRAM (where
+                        // o3DS actually scans out from, 0x20000000+) is now
+                        // identity-mapped read-only via cia.rsf.
+                        u8* mapped = nullptr;
                         if(phys >= 0x18000000 && phys < 0x18600000)
+                            mapped = (u8*)(0x1F000000 + (phys - 0x18000000));
+                        else if(phys >= 0x20000000 && phys < 0x28000000)
+                            mapped = (u8*)phys; // FCRAM identity mapping
+                        if(mapped)
                         {
                             // Same strip offset as the DMA path; the scanout
                             // fb shares the 240-tall-column geometry.
-                            srcaddr = (u8*)(0x1F000000 + (phys - 0x18000000))
-                                    + (region_siz * offs[scr]);
-                            srcprochand = 0xFFFF8001; // our own VRAM mapping
+                            srcaddr = mapped + (region_siz * offs[scr]);
+                            srcprochand = 0xFFFF8001; // our own mapping, no game handle
                             format[scr] = (*(volatile u32*)(rb + 0x70)) & 0b111;
                             m->fmt = (u8)format[scr];
                         }
                         else if(soc && !dmafail_reported)
                         {
                             dmafail_reported = true;
-                            soc->errformat((char*)"capture: PDC fb addr out of VRAM (%08X), using DMA", (u32)phys);
+                            soc->errformat((char*)"capture: PDC fb addr unmapped (%08X), using DMA", (u32)phys);
                         }
                     }
                     int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);

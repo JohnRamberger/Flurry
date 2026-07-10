@@ -98,8 +98,10 @@ AccessControlInfo:
    - 1ff00000-1ff7ffff    # DSP memory
    - 1ef00000-1ef00fff    # GPU IO Registers
    - 1ec46000-1ec46fff    # HID IO Registers
-  MemoryMapping: 
+  MemoryMapping:
    - 1f000000-1f5fffff:rw # VRAM (Don't change probably)
+   - 20000000-27ffffff:r  # FCRAM read: PDC-direct capture reads the physical
+                          # scanout framebuffer of any foreground app (games)
 
   # Accessible SVCs, <Name>:<ID>, https://www.3dbrew.org/wiki/Kernel_ABI
   SystemCallAccess: 
