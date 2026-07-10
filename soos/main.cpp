@@ -429,6 +429,8 @@ enum {
     CFG_V2           = 15, // protocol v2 (SFRAME) framing
     CFG_GRID_COLS    = 16, // dirty-grid columns per screen
     CFG_GRID_ROWS    = 17, // dirty-grid rows per screen
+    CFG_CAPTURE      = 18, // capture backend: 0 = inter-process DMA,
+                           // 1 = GPU display-transfer (experimental)
 };
 
 // Config Block
@@ -861,6 +863,11 @@ int netfuncWaitForSettings()
                         cfgblk[CFG_GRID_ROWS] = j;
                         memset(cell_crc, 0, sizeof(cell_crc));
                     }
+                    return 1;
+
+                case 0x12: // Flurry extension: capture backend (0 DMA, 1 GPU)
+                    if(j <= 1)
+                        cfgblk[CFG_CAPTURE] = j;
                     return 1;
 
                 default:
@@ -1719,7 +1726,26 @@ void newThreadMainFunction(void* __dummy_arg__)
                                                  stride[scr] * 240 * 3);
                     }
 
-                    int ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
+                    // Capture backend (Flurry extension, setting 0x12):
+                    //   0 = inter-process DMA (works for homebrew/applets;
+                    //       retail games deny it, D9000402)
+                    //   1 = GPU display-transfer (experimental, for capturing
+                    //       protected retail game framebuffers) — TODO: issue
+                    //       GX_DisplayTransfer from the active fb into capbuf.
+                    //       Until implemented, log once and use DMA so the
+                    //       toggle is safe.
+                    int ret_dma;
+                    if(cfgblk[CFG_CAPTURE] == 1)
+                    {
+                        static bool gpu_todo_reported = false;
+                        if(soc && !gpu_todo_reported)
+                        {
+                            gpu_todo_reported = true;
+                            soc->errformat((char*)"capture: GPU-transfer backend not implemented yet, using DMA");
+                        }
+                        // fall through to DMA for now
+                    }
+                    ret_dma = svcStartInterProcessDma(&dmahand, 0xFFFF8001, capbuf[nxt], srcprochand, srcaddr, siz2, dma_config[scr]);
                     if(ret_dma < 0)
                     {
                         procid = 0;
@@ -2611,7 +2637,7 @@ int main()
                     soc->setPakSubtypeB(0);
                     soc->bufferptr[bufsoc_pak_data_offset + 0] = 1; // announce revision
                     soc->bufferptr[bufsoc_pak_data_offset + 1] = 0b11111111; // strip-skip | fps-cap | o3DS-interlace | chunks | strip-sleep | downscale | stats-toggle | protocol-v2
-                    soc->bufferptr[bufsoc_pak_data_offset + 2] = 0b00000001; // features2: cell-size setting
+                    soc->bufferptr[bufsoc_pak_data_offset + 2] = 0b00000011; // features2: cell grid | capture-method
                     soc->setPakSize(3);
                     soc->wribuf();
 
