@@ -1200,16 +1200,25 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
         g_lastapp_vaddr = fbva;
         g_lastapp_valid = 1;
 
-        // Also to the SD log (Flurry.log): a title that FULLY crashes the
-        // module (flashing-yellow, no reconnect) can't re-emit over the
-        // stream, but the file survives — read its last lines after.
+        // SD log (Flurry.log) — but ONLY when the format/stride actually
+        // changes, NOT on every buffer-pointer flip. Double-buffered games
+        // (OoT) flip framebuf0_vaddr every frame; logging per flip wrote
+        // ~60 lines/sec, ballooned the log to tens of MB and the per-frame
+        // SD I/O wedged the capture thread.
 #if DEBUG_BASIC==1
-        printf("fbchange vaddr=%08X top fmt=%08X wbs=%u | bot fmt=%08X wbs=%u\n",
-               (unsigned int)fbva,
-               (unsigned int)new_captureinfo.screencapture[0].format,
-               (unsigned int)new_captureinfo.screencapture[0].framebuf_widthbytesize,
-               (unsigned int)new_captureinfo.screencapture[1].format,
-               (unsigned int)new_captureinfo.screencapture[1].framebuf_widthbytesize);
+        {
+            u32 f0 = (u32)new_captureinfo.screencapture[0].format;
+            u32 w0 = (u32)new_captureinfo.screencapture[0].framebuf_widthbytesize;
+            static u32 last_f0 = 0xFFFFFFFF, last_w0 = 0xFFFFFFFF;
+            if(f0 != last_f0 || w0 != last_w0)
+            {
+                last_f0 = f0; last_w0 = w0;
+                printf("fbfmt vaddr=%08X top fmt=%08X wbs=%u | bot fmt=%08X wbs=%u\n",
+                       (unsigned int)fbva, (unsigned int)f0, (unsigned int)w0,
+                       (unsigned int)new_captureinfo.screencapture[1].format,
+                       (unsigned int)new_captureinfo.screencapture[1].framebuf_widthbytesize);
+            }
+        }
 #endif
 
         // Real VRAM only: 0x1F000000-0x1F5FFFFF (retail applets render
