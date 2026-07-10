@@ -2253,8 +2253,8 @@ void newThreadMainFunction(void* __dummy_arg__)
                 // the core and audio buffers underrun (crackle while
                 // connected). n3DS gets only the floor.
                 u64 ns = isold ? (u64)cfgblk[CFG_SLEEP] * 1000000ULL : 0;
-                if(ns < 3e5) ns = 3e5;
-                svcSleepThread(ns);
+                if(ns < 15e5) ns = 15e5; // ~1.5 ms floor: DSP/audio service
+                svcSleepThread(ns);      // on syscore needs real airtime
             }
         }
         else
