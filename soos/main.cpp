@@ -500,6 +500,9 @@ static u64 cellwatch_ms = 0;
 static u64 g_lastapp_progid = 0;
 static u32 g_lastapp_fmt = 0;
 static u32 g_lastapp_wbs = 0;
+static u32 g_lastapp_fmt2 = 0;
+static u32 g_lastapp_wbs2 = 0;
+static u32 g_lastapp_vaddr = 0;
 static u8  g_lastapp_valid = 0;
 
 // Sweep markers: set when a screen's strip index wraps, consumed by the
@@ -1185,6 +1188,17 @@ void netfuncTestFramebuffer(u32* procid, GSPGPU_CaptureInfo new_captureinfo, GSP
     if(is_changed)
     {
         u32 fbva = (u32)new_captureinfo.screencapture[0].framebuf0_vaddr;
+
+        // Stash params of EVERY fb change (VRAM and app paths) so a title
+        // that faults the capture thread — including a VRAM-backed game
+        // like OoT3D — has its params re-emitted on the next reconnect.
+        g_lastapp_progid = 0;
+        g_lastapp_fmt = (u32)new_captureinfo.screencapture[0].format;
+        g_lastapp_wbs = (u32)new_captureinfo.screencapture[0].framebuf_widthbytesize;
+        g_lastapp_fmt2 = (u32)new_captureinfo.screencapture[1].format;
+        g_lastapp_wbs2 = (u32)new_captureinfo.screencapture[1].framebuf_widthbytesize;
+        g_lastapp_vaddr = fbva;
+        g_lastapp_valid = 1;
 
         // Real VRAM only: 0x1F000000-0x1F5FFFFF (retail applets render
         // there). Application linear heap lives at 0x30000000+ for
@@ -2581,9 +2595,10 @@ int main()
                     // on an app's fb (its telemetry lost with the TCP drop),
                     // report the culprit's params now.
                     if(g_lastapp_valid)
-                        soc->errformat((char*)"last app before reconnect: progid=%08X%08X fmt=%08X wbs=%u",
-                                       (u32)(g_lastapp_progid >> 32), (u32)g_lastapp_progid,
-                                       (unsigned int)g_lastapp_fmt, (unsigned int)g_lastapp_wbs);
+                        soc->errformat((char*)"last fb before reconnect: vaddr=%08X top fmt=%08X wbs=%u | bot fmt=%08X wbs=%u",
+                                       (unsigned int)g_lastapp_vaddr,
+                                       (unsigned int)g_lastapp_fmt, (unsigned int)g_lastapp_wbs,
+                                       (unsigned int)g_lastapp_fmt2, (unsigned int)g_lastapp_wbs2);
 
                     netthread = threadCreate(newThreadMainFunction, nullptr, netfunc_thread_stack_siz, netfunc_thread_priority, netfunc_thread_cpu, true);
 
