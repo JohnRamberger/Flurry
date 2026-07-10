@@ -2387,7 +2387,10 @@ int main()
         soc_service_buf_siz = 0x10000;
         bufsoc_siz = 0xC000; // Consider trying 0x10000, but that may do nothing but waste memory.
         netfunc_thread_stack_siz = 0x2000;
-        netfunc_thread_priority = 0x14;
+        // Lower priority (higher number) than the DSP/audio service so it
+        // preempts us instead of starving — 0x14 hogged syscore and made
+        // audio crackle. 0x0-0x3F, lower = higher priority.
+        netfunc_thread_priority = 0x20;
         netfunc_thread_cpu = 1;
 
         /* interlacing is disabled on o3DS
@@ -2427,7 +2430,7 @@ int main()
         // Setting priority around 0x10 (16) makes it stop slowing down Home Menu and games.
         // Priority:
         // Range from 0x00 to 0x3F. Lower numbers mean higher priority.
-        netfunc_thread_priority = 0x10;
+        netfunc_thread_priority = 0x18;
         //
         // Processor ID:
         // -2 = Default (Don't bother using this)
