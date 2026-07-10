@@ -68,6 +68,44 @@ extern "C"
 
 #include "utils.hpp"
 
+// Luma3DS custom SVCs (numbers from Luma sysmodules/rosalina/source/csvc.s).
+// Not in libctru — declared with hand-written stubs. Used to reach a running
+// game's framebuffer that inter-process DMA is denied (D9000402). Only
+// callable if Luma permits custom SVCs for this process — probed first.
+extern "C"
+{
+    u32 svcConvertVAToPA(const void* VA, bool writeCheck);
+    Result svcMapProcessMemoryEx(Handle dst, u32 destAddress, Handle src,
+                                 u32 srcAddress, u32 size, u32 flags);
+    Result svcUnmapProcessMemoryEx(Handle process, u32 destAddress, u32 size);
+}
+__asm__(
+    ".section .text\n"
+    ".arm\n"
+
+    ".global svcConvertVAToPA\n"
+    ".type svcConvertVAToPA, %function\n"
+    "svcConvertVAToPA:\n"
+    "    svc 0x90\n"
+    "    bx lr\n"
+
+    ".global svcMapProcessMemoryEx\n"
+    ".type svcMapProcessMemoryEx, %function\n"
+    "svcMapProcessMemoryEx:\n"
+    "    push {r4, r5}\n"
+    "    ldr r4, [sp, #8]\n"   // 5th arg: size
+    "    ldr r5, [sp, #12]\n"  // 6th arg: flags
+    "    svc 0xA0\n"
+    "    pop {r4, r5}\n"
+    "    bx lr\n"
+
+    ".global svcUnmapProcessMemoryEx\n"
+    ".type svcUnmapProcessMemoryEx, %function\n"
+    "svcUnmapProcessMemoryEx:\n"
+    "    svc 0xA1\n"
+    "    bx lr\n"
+);
+
 extern u32 kDown;
 extern u32 kHeld;
 //extern u32 kUp;
@@ -1741,6 +1779,19 @@ void newThreadMainFunction(void* __dummy_arg__)
                     //       D9000402. Captures retail games.
                     if(cfgblk[CFG_CAPTURE] == 1)
                     {
+                        // Probe once whether Luma lets us call custom SVCs:
+                        // convert a known-mapped VA (VRAM) to its physical.
+                        // ~0x18000000 back = custom SVCs work → the game-fb
+                        // map path is viable. An error/garbage = Luma blocks
+                        // this process → game capture needs a 3GX plugin.
+                        static bool csvc_probed = false;
+                        if(!csvc_probed && soc)
+                        {
+                            csvc_probed = true;
+                            u32 pa = svcConvertVAToPA((const void*)0x1F000000, false);
+                            soc->errformat((char*)"csvc probe: VAToPA(1F000000)=%08X (expect ~18000000)", (u32)pa);
+                        }
+
                         u32 rb = (scr == 0) ? 0x1EF00400 : 0x1EF00500;
                         u32 sel = *(volatile u32*)(rb + 0x78);
                         // bit 0 = next fb after VBlank; the one on screen now
